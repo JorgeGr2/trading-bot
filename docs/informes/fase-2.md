@@ -9,7 +9,7 @@
 - **Se pueden identificar los traders de FOMO con datos públicos de la blockchain.** Muestra: 49 transacciones reales de 39 traders distintos.
   - En el 100 % de la muestra, una wallet de FOMO firma y paga la transacción, y el trader aparece como **segundo firmante**.
   - El bot atribuye cada operación a quien cambia de saldo, no a quien paga, y acierta en todas las compraventas de la muestra.
-- **Las operaciones se detectan en vivo con un retraso mediano de 1,1 s** respecto al bloque (percentil 95: 1,6 s), usando el WebSocket público gratuito.
+- **El aviso de cada operación llega por WebSocket con un retraso mediano de 1,1–1,5 s** respecto al bloque. Pero con el RPC público gratuito, **descargar la transacción completa añade una mediana de 5,8 s (hasta 59 s)** por los límites de uso. Para seguir traders en serio hace falta Helius.
 - **El monitor sigue wallets, guarda cada operación, se recupera de cortes y reinicios** y no duplica nada. Lo prueban 100 tests automáticos y tres pruebas en vivo con traders reales.
 - **Hallazgos que afectan a la estrategia:**
   - Algunos tokens que compran los usuarios de FOMO cobran un 1 % en cada transferencia, y su creador puede subir esa comisión.
@@ -142,7 +142,17 @@ Se siguieron 10 traders de la muestra con el monitor completo (RPC y WebSocket p
   - 1 «transferencia recibida»: un reparto automático de pump.fun a los poseedores de un token (`DistributeFeeToHolders`). Revisada a mano: la clasificación es correcta y **no es una compra**.
   - El RPC público rechazó 3 descargas tras agotar los reintentos. El monitor siguió funcionando y las recogió después.
   - La latencia anotada (mediana 9,9 s, máximo 74 s) estaba **inflada por un error de medición** (apartado 6), ya corregido.
-- **Tercera ejecución, con el código corregido.** RESULTADOS_SMOKE3
+- **Tercera ejecución, con el código corregido, 8 minutos completos** (detenida por el temporizador).
+  - 22 transacciones (20 en vivo y 2 recuperadas). 18 compraventas de confianza alta en USDC, de 4 traders.
+  - 2 descargas rechazadas por el proveedor: gestionadas sin detener el monitor.
+
+  | Medida (20 transacciones en vivo) | Mínimo | Mediana | p95 | Máximo |
+  |---|---|---|---|---|
+  | Del bloque al aviso por WebSocket | 0,58 s | 1,49 s | 3,02 s | 4,17 s |
+  | Del aviso a tener la transacción completa (RPC público) | — | 5,8 s | — | 59 s |
+
+  **Conclusión:** con el RPC público, el bot tardaría una mediana de unos 7 s en poder decidir, y hasta un minuto en los peores casos. Casi todo ese tiempo se va en esperar por los límites de uso. **Para seguir traders en serio hace falta un proveedor sin esa limitación (Helius)**, incluso con pocas wallets.
+  - Se ven estilos de trading muy distintos. Un trader (`J517xwf6…`) entra y sale con 100–200 $ varias veces en pocos minutos; otro (`7ab7MBy9…`) rota unos 8 $ entre tokens en segundos.
 
 ## 6. Problemas encontrados y corregidos
 

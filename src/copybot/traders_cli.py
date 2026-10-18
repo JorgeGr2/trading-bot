@@ -295,13 +295,19 @@ async def show(ctx: Context, wallet: str) -> None:
             print(f"  {key}: {m.get(key)}")
 
 
-def parse_as_of(text: str | None) -> datetime:
+def parse_as_of(text: str | None, now: datetime | None = None) -> datetime:
+    """Fecha de análisis en UTC. No puede ser futura: el snapshot se guardaría como si
+    conociera datos que aún no existen y, al ser inmutable, quedaría incompleto."""
+    now = (now or datetime.now(UTC)).replace(microsecond=0)
     if text is None:
-        return datetime.now(UTC).replace(microsecond=0)
+        return now
     moment = datetime.fromisoformat(text)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC)
+    moment = moment.astimezone(UTC)
+    if moment > now:
+        raise SystemExit(f"--as-of no puede ser posterior a ahora ({now:%Y-%m-%d %H:%M:%S} UTC)")
+    return moment
 
 
 async def run(args: argparse.Namespace, settings: Settings) -> int:

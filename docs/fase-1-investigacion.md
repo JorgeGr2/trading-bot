@@ -79,6 +79,8 @@ Para la Fase 2 necesito una de estas dos cosas: que habilites en el entorno de d
 
 **Regla:** las cifras de PnL o *win rate* de terceros (Birdeye, Solana Tracker, FOMO) solo se usan como **contraste**. Las métricas de verdad se calculan a partir de transacciones on-chain propias.
 
+> **Actualización (Fase 3, 18-oct-2026):** con la clave de Helius actual, `getTransactionsForAddress` funciona y devuelve **hasta 1.000 transacciones completas por petición** (no 100). Según la documentación cuesta 100 créditos por petición; falta confirmarlo en el panel de Helius. Las fuentes de precios históricos (Binance, Pyth, CoinGecko) siguen bloqueadas en el entorno de desarrollo. Detalles en [`docs/informes/fase-3.md`](informes/fase-3.md).
+
 ---
 
 ## 4. Viabilidad

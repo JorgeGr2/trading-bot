@@ -96,6 +96,7 @@ class WalletMonitor:
             self.stats["duplicates"] += 1
             return False
         tx = await self._fetch(signature)
+        fetched_at = self._clock()
         try:
             summary = summarize(tx, self._relayers)
             wallets = set(await self._repo.active_wallets())
@@ -110,6 +111,7 @@ class WalletMonitor:
             source=self._source,
             detected_via=detected_via,
             first_seen_at=seen_at,
+            fetched_at=fetched_at,
         )
         if stored:
             self.stats[detected_via] += 1
@@ -193,10 +195,21 @@ class WalletMonitor:
                 except Exception:
                     log.exception("periodic_reconcile_failed")
 
-        task = asyncio.create_task(periodic())
-        item: LiveItem
+        # Los avisos se leen en una tarea aparte, sin esperar a que se procese el
+        # anterior: así la hora de llegada que se anota es la real, aunque descargar
+        # una transacción tarde (p. ej. si el proveedor limita las peticiones).
+        queue: asyncio.Queue[LiveItem | None] = asyncio.Queue()
+
+        async def pump() -> None:
+            try:
+                async for live_item in live:
+                    queue.put_nowait(live_item)
+            finally:
+                queue.put_nowait(None)
+
+        tasks = [asyncio.create_task(periodic()), asyncio.create_task(pump())]
         try:
-            async for item in live:
+            while (item := await queue.get()) is not None:
                 if isinstance(item, Reconnected):
                     await self.reconcile_all()
                     continue
@@ -205,5 +218,7 @@ class WalletMonitor:
                 except (TransactionUnavailableError, RpcError) as exc:
                     self.stats["rpc_errors"] += 1
                     log.warning("live_tx_failed", signature=item.signature, error=str(exc))
+            await tasks[1]  # propaga un posible error del lector
         finally:
-            task.cancel()
+            for task in tasks:
+                task.cancel()

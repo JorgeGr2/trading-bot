@@ -1,8 +1,8 @@
 """esquema inicial
 
-Revision ID: 6e2ed362ac4f
+Revision ID: 75d7cd1b817a
 Revises:
-Create Date: 2026-10-18 11:47:44.603063
+Create Date: 2026-10-18 11:55:52.918506
 
 """
 
@@ -13,7 +13,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "6e2ed362ac4f"
+revision: str = "75d7cd1b817a"
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -55,6 +55,7 @@ def upgrade() -> None:
         sa.Column("source", sa.String(length=40), nullable=False),
         sa.Column("detected_via", sa.String(length=10), nullable=False),
         sa.Column("first_seen_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("fetched_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("detection_latency_ms", sa.BigInteger(), nullable=True),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.CheckConstraint("detected_via IN ('live', 'backfill')", name="detected_via_valid"),

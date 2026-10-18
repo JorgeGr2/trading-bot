@@ -139,8 +139,9 @@ def summarize(tx: dict[str, Any], relayers: frozenset[str] = frozenset()) -> TxS
         meta = tx["meta"]
         signature = tx["transaction"]["signatures"][0]
         slot = int(tx["slot"])
-    except (KeyError, IndexError, TypeError) as exc:
-        raise MalformedTransactionError(str(exc)) from exc
+        programs = _programs(tx, keys)
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+        raise MalformedTransactionError(f"{type(exc).__name__}: {exc}") from exc
     pubkeys = {a.pubkey for a in keys}
     return TxSummary(
         signature=signature,
@@ -150,7 +151,7 @@ def summarize(tx: dict[str, Any], relayers: frozenset[str] = frozenset()) -> TxS
         signers=tuple(a.pubkey for a in keys if a.signer),
         fee_lamports=int(meta.get("fee", 0)),
         succeeded=meta.get("err") is None,
-        programs=_programs(tx, keys),
+        programs=programs,
         via_fomo=keys[0].pubkey in relayers or FOMO_MARKER_ACCOUNT in pubkeys,
     )
 
@@ -217,8 +218,22 @@ def classify(
     """Devuelve los eventos de ``wallets`` en la transacción.
 
     Si ``wallets`` es ``None`` (modo descubrimiento) se analizan los firmantes que
-    no son relayers conocidos ni el pagador de la comisión.
+    no son relayers conocidos ni el pagador de la comisión. Un JSON con forma
+    inesperada produce ``MalformedTransactionError``, nunca otro tipo de error.
     """
+    try:
+        return _classify(tx, wallets, relayers)
+    except MalformedTransactionError:
+        raise
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+        raise MalformedTransactionError(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _classify(
+    tx: dict[str, Any],
+    wallets: set[str] | None,
+    relayers: frozenset[str],
+) -> list[WalletEvent]:
     summary = summarize(tx, relayers)
     if not summary.succeeded:
         return []

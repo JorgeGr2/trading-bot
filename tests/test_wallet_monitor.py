@@ -34,6 +34,23 @@ def add_buy(rpc: FakeRpc, sig: str, slot: int, wallet: str = W) -> str:
     )
 
 
+async def eventually(predicate, limit_seconds: float = 5.0) -> None:
+    """Espera a que el monitor (que procesa en paralelo) alcance un estado."""
+    import asyncio
+    import inspect
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + limit_seconds
+    while loop.time() < deadline:
+        result = predicate()
+        if inspect.isawaitable(result):
+            result = await result
+        if result:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("el monitor no alcanzó el estado esperado")
+
+
 def live(sig: str, received: datetime, failed: bool = False) -> Notification:
     return Notification(address=W, signature=sig, slot=None, failed=failed, received_at=received)
 
@@ -122,10 +139,12 @@ async def test_gap_during_disconnection_is_recovered(repo):
     async def stream():
         yield Reconnected(0)
         yield live(a, t0)
+        await eventually(lambda: monitor.stats["live"] == 1)
         # Conexión caída: "b" y "c" ocurren sin notificación.
         add_buy(rpc, "b", 102)
         add_buy(rpc, "c", 103)
         yield Reconnected(1)
+        await eventually(lambda: monitor.stats["backfill"] == 2)
         d = add_buy(rpc, "d", 104)
         yield live(d, t0)
 
@@ -221,11 +240,14 @@ async def test_provider_failure_does_not_stop_the_monitor(repo):
 
     async def stream():
         yield Reconnected(0)  # primer arranque: el punto de partida es "old"
+        await eventually(lambda: repo.get_checkpoint(W))
         a = add_buy(rpc, "a", 101)
         rpc.failing.add(a)
         yield live(a, t0)  # falla: 429
+        await eventually(lambda: monitor.stats["rpc_errors"] == 1)
         b = add_buy(rpc, "b", 102)
         yield live(b, t0)  # sigue funcionando
+        await eventually(lambda: monitor.stats["live"] == 1)
         rpc.failing.clear()
         yield Reconnected(1)  # la recuperación recoge "a"
 
@@ -249,3 +271,58 @@ async def test_reconcile_survives_provider_errors_per_wallet(repo):
     assert await monitor.reconcile_all() == 1  # la otra wallet sí avanza
     assert (await repo.get_checkpoint(W)).last_signature == "old"
     assert (await repo.get_checkpoint(OTHER)).last_signature == "good"
+
+
+async def test_live_records_notification_and_fetch_times(repo, engine):
+    """Se guarda cuándo llegó el aviso y cuándo se tuvo la transacción completa:
+    la simulación solo podrá decidir a partir del segundo momento."""
+    from copybot.db.models import RawTransaction
+    from copybot.db.session import make_sessionmaker
+
+    rpc = FakeRpc()
+    add_buy(rpc, "old", 100)
+    await repo.add_wallet(W, source="manual")
+    fetched = datetime(2030, 1, 1, tzinfo=UTC)
+    monitor = make_monitor(rpc, repo, clock=lambda: fetched)
+    await monitor.reconcile(W)
+    sig = add_buy(rpc, "a", 101)
+    block_time = rpc.transactions[sig]["blockTime"]
+    received = datetime.fromtimestamp(block_time + 2, tz=UTC)
+    await monitor.handle_live(live(sig, received))
+
+    async with make_sessionmaker(engine)() as s:
+        row = await s.get(RawTransaction, sig)
+    assert row.first_seen_at == received
+    assert row.fetched_at == fetched
+    assert row.detection_latency_ms == 2000
+
+
+async def test_notifications_are_read_while_a_slow_fetch_is_in_progress(repo):
+    """Si descargar una transacción tarda, los avisos siguientes no deben quedarse
+    esperando: su hora de llegada tiene que ser la real."""
+    import asyncio
+    import time
+
+    rpc = FakeRpc()
+    add_buy(rpc, "old", 100)
+    await repo.add_wallet(W, source="manual")
+    monitor = make_monitor(rpc, repo)
+    await monitor.reconcile(W)
+    original = rpc.get_transaction
+
+    async def slow_get_transaction(signature, commitment="confirmed"):
+        await asyncio.sleep(0.3)
+        return await original(signature, commitment)
+
+    rpc.get_transaction = slow_get_transaction
+    sigs = [add_buy(rpc, f"s{i}", 101 + i) for i in range(3)]
+    yielded_at: list[float] = []
+
+    async def stream():
+        for sig in sigs:
+            yielded_at.append(time.monotonic())
+            yield live(sig, datetime.now(UTC))
+
+    await monitor.run(stream())
+    assert yielded_at[-1] - yielded_at[0] < 0.1  # leídos sin esperar a las descargas
+    assert monitor.stats["live"] == 3

@@ -376,3 +376,20 @@ def test_malformed_transaction_is_rejected():
 def test_route_dust_is_reported_not_traded():
     [ev] = classify(load("fomo_buy_with_route_dust"), None, RELAYERS)
     assert any("polvo" in r for r in ev.reasons)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda tx: tx["meta"].pop("preBalances"),
+        lambda tx: tx["meta"]["postTokenBalances"][0].pop("uiTokenAmount"),
+        lambda tx: tx["meta"].__setitem__("preBalances", None),
+        lambda tx: tx["transaction"]["message"].__setitem__("accountKeys", "basura"),
+        lambda tx: tx["meta"]["preTokenBalances"][0].__setitem__("accountIndex", 9999),
+    ],
+)
+def test_unexpected_shapes_raise_malformed_only(mutate):
+    tx = load("fomo_sell_pumpswap_clmm")
+    mutate(tx)
+    with pytest.raises(MalformedTransactionError):
+        classify(tx, None, RELAYERS)

@@ -97,6 +97,7 @@ class Repository:
         source: str,
         detected_via: str,
         first_seen_at: datetime,
+        fetched_at: datetime | None = None,
     ) -> bool:
         """Guarda la transacción y sus eventos de forma atómica.
 
@@ -119,6 +120,7 @@ class Repository:
                     source=source,
                     detected_via=detected_via,
                     first_seen_at=first_seen_at,
+                    fetched_at=fetched_at or first_seen_at,
                     detection_latency_ms=latency_ms,
                     payload=tx,
                 )

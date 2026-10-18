@@ -74,6 +74,8 @@ class RawTransaction(Base):
     # Cómo se detectó por primera vez: en vivo (live) o al recuperar huecos (backfill).
     detected_via: Mapped[str] = mapped_column(String(10))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Momento en que se obtuvo la transacción completa (cuando ya se puede decidir).
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     detection_latency_ms: Mapped[int | None] = mapped_column(BigInteger)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
 

@@ -3,6 +3,8 @@
 copybot wallets add <dirección> [--label TEXTO]
 copybot wallets list
 copybot monitor
+
+Descubrimiento y análisis de traders: ver ``copybot.traders_cli``.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from datetime import UTC, datetime
 import structlog
 
 from copybot import logging as copylog
+from copybot import traders_cli
 from copybot.config import Settings
 from copybot.db.repo import Repository
 from copybot.db.session import make_engine, make_sessionmaker
@@ -100,13 +103,19 @@ def main(argv: list[str] | None = None) -> int:
     add.add_argument("--label")
     wsub.add_parser("list")
     sub.add_parser("monitor", help="seguir las wallets en vivo")
+    traders_cli.add_parsers(sub)
     args = parser.parse_args(argv)
 
     settings = Settings()
-    copylog.configure()
     if args.command == "wallets":
+        copylog.configure()
         return asyncio.run(_wallets(args, settings))
-    return asyncio.run(_monitor(settings))
+    if args.command == "monitor":
+        copylog.configure()
+        return asyncio.run(_monitor(settings))
+    # El análisis escribe un informe legible; los logs, solo si hay avisos.
+    copylog.configure("WARNING")
+    return asyncio.run(traders_cli.run(args, settings))
 
 
 if __name__ == "__main__":

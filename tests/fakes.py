@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import copy
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 from copybot.solana.constants import TOKEN_PROGRAM, USDC_MINT
-from copybot.solana.rpc import RpcError
+from copybot.solana.rpc import RpcError, TransactionPage
 
 RELAYER = "AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51"
 PUMPSWAP = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
@@ -136,3 +136,67 @@ class FakeRpc:
 
     def count(self, method: str) -> int:
         return sum(1 for name, _ in self.calls if name == method)
+
+
+class FakeHistoryRpc:
+    """``getTransactionsForAddress`` en memoria (orden, filtros de tiempo y paginación)."""
+
+    def __init__(self, credits_per_call: int = 100) -> None:
+        self.by_address: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.credits: Counter[str] = Counter()
+        self.calls: list[dict[str, Any]] = []
+        self.fail_after: int | None = None  # simula un corte tras N peticiones
+        self._cost = credits_per_call
+
+    def add(self, address: str, tx: dict[str, Any], tx_index: int = 0) -> None:
+        item = copy.deepcopy(tx)
+        item["transactionIndex"] = tx_index
+        self.by_address[address].append(item)
+
+    async def get_transactions_for_address(
+        self,
+        address: str,
+        *,
+        full: bool,
+        limit: int = 1000,
+        sort_order: str = "desc",
+        block_time_gte: int | None = None,
+        block_time_lt: int | None = None,
+        pagination_token: str | None = None,
+        associated_accounts: str = "balanceChanged",
+        only_succeeded: bool = True,
+    ) -> TransactionPage:
+        if self.fail_after is not None and len(self.calls) >= self.fail_after:
+            raise RpcError("getTransactionsForAddress", "HTTP 429", 429)
+        self.calls.append(
+            {
+                "address": address,
+                "gte": block_time_gte,
+                "lt": block_time_lt,
+                "token": pagination_token,
+                "order": sort_order,
+            }
+        )
+        self.credits["getTransactionsForAddress"] += self._cost
+        items = [
+            t
+            for t in self.by_address.get(address, [])
+            if (block_time_gte is None or t["blockTime"] >= block_time_gte)
+            and (block_time_lt is None or t["blockTime"] < block_time_lt)
+            and (not only_succeeded or t["meta"]["err"] is None)
+        ]
+        items.sort(key=lambda t: (t["slot"], t["transactionIndex"]), reverse=sort_order == "desc")
+        offset = int(pagination_token or 0)
+        page = items[offset : offset + limit]
+        if not full:
+            page = [
+                {
+                    "signature": t["transaction"]["signatures"][0],
+                    "slot": t["slot"],
+                    "blockTime": t["blockTime"],
+                    "err": t["meta"]["err"],
+                }
+                for t in page
+            ]
+        token = str(offset + limit) if len(page) == limit else None
+        return TransactionPage([copy.deepcopy(t) for t in page], token)

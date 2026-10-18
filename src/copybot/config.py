@@ -89,6 +89,17 @@ class Settings(BaseSettings):
 
     monthly_budget_usd: Decimal = Field(default=MAX_MONTHLY_BUDGET_USD, gt=0)
 
+    # Créditos de Helius incluidos en el plan contratado (Free: 1 M al mes) y parte que
+    # puede gastar el análisis de traders. El resto queda para el seguimiento en vivo.
+    helius_monthly_credits: int = Field(default=1_000_000, gt=0, le=1_000_000_000)
+    analysis_credit_share_pct: Decimal = Field(default=Decimal("60"), gt=0, le=100)
+
+    # Historial que se importa de cada wallet para analizarla: la ventana principal
+    # (30 días) más un margen para conocer el coste de lo comprado antes de ella.
+    history_days: int = Field(default=37, gt=0, le=120)
+    # Máximo de páginas (de hasta 1.000 transacciones) por wallet e importación.
+    history_max_pages: int = Field(default=10, gt=0, le=100)
+
     # Si los datos son más antiguos que esto, no se toman decisiones de entrada.
     max_data_staleness_seconds: float = Field(default=30.0, gt=0, le=300)
 
@@ -105,6 +116,9 @@ class Settings(BaseSettings):
         from copybot.solana.addresses import validate_address
 
         return validate_address(value)
+
+    def analysis_credit_limit(self) -> int:
+        return int(self.helius_monthly_credits * self.analysis_credit_share_pct / 100)
 
     def rpc_endpoints(self) -> tuple[str, str]:
         """URL HTTP y WebSocket del proveedor. Contienen la clave: no registrarlas."""

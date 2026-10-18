@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -71,16 +72,24 @@ class RawTransaction(Base):
     via_fomo: Mapped[bool] = mapped_column(Boolean)
     succeeded: Mapped[bool] = mapped_column(Boolean)
     source: Mapped[str] = mapped_column(String(40))  # proveedor del que se obtuvo
-    # Cómo se detectó por primera vez: en vivo (live) o al recuperar huecos (backfill).
+    # Cómo se detectó por primera vez: en vivo (live), al recuperar huecos (backfill) o
+    # al importar el historial de una wallet para analizarla (history).
     detected_via: Mapped[str] = mapped_column(String(10))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Momento en que se obtuvo la transacción completa (cuando ya se puede decidir).
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     detection_latency_ms: Mapped[int | None] = mapped_column(BigInteger)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    # Posición dentro del bloque (solo la conocemos en el historial de Helius).
+    tx_index: Mapped[int | None] = mapped_column(Integer)
+    # JSON completo de la transacción. En el historial no se guarda (~30 KB por
+    # transacción y se puede volver a descargar); en vivo y en la recuperación, siempre.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
     __table_args__ = (
-        CheckConstraint("detected_via IN ('live', 'backfill')", name="detected_via_valid"),
+        CheckConstraint(
+            "detected_via IN ('live', 'backfill', 'history')", name="detected_via_valid"
+        ),
+        CheckConstraint("payload IS NOT NULL OR detected_via = 'history'", name="payload_required"),
     )
 
 
@@ -103,6 +112,7 @@ class WalletEvent(Base):
     reasons: Mapped[list[str]] = mapped_column(JSONB, default=list)
     slot: Mapped[int] = mapped_column(BigInteger)
     block_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tx_index: Mapped[int | None] = mapped_column(Integer)
     detected_via: Mapped[str] = mapped_column(String(10))
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     classifier_version: Mapped[str] = mapped_column(String(20))
@@ -111,10 +121,140 @@ class WalletEvent(Base):
         UniqueConstraint("signature", "wallet", name="uq_wallet_events_signature_wallet"),
         Index("ix_wallet_events_wallet_slot", "wallet", "slot"),
         CheckConstraint(
+            "detected_via IN ('live', 'backfill', 'history')", name="event_detected_via_valid"
+        ),
+        CheckConstraint(
             "kind IN ('buy', 'sell', 'transfer_in', 'transfer_out', 'ambiguous')",
             name="kind_valid",
         ),
         CheckConstraint("confidence IN ('high', 'medium', 'low')", name="confidence_valid"),
+    )
+
+
+class Token(Base):
+    """Datos de cada token que usa el analizador. La creación se obtiene con una
+    consulta por token (la primera transacción del mint) y se guarda para siempre."""
+
+    __tablename__ = "tokens"
+
+    mint: Mapped[str] = mapped_column(ADDRESS, primary_key=True)
+    created_slot: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    creation_signature: Mapped[str | None] = mapped_column(SIGNATURE)
+    creation_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DiscoveryWindow(Base):
+    """Un tramo del historial del relayer de FOMO muestreado para descubrir traders."""
+
+    __tablename__ = "discovery_windows"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Instante pedido (se descargan las transacciones a partir de aquí, en orden).
+    requested_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_block_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_block_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    transactions: Mapped[int] = mapped_column(Integer)
+    trades: Mapped[int] = mapped_column(Integer)
+    credits: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DiscoveryObservation(Base):
+    """Una compraventa de un usuario de FOMO vista al muestrear el relayer.
+
+    Es una muestra, no el historial completo de la wallet: sirve para elegir a quién
+    analizar, nunca para calcular sus métricas.
+    """
+
+    __tablename__ = "discovery_observations"
+
+    signature: Mapped[str] = mapped_column(SIGNATURE, primary_key=True)
+    wallet: Mapped[str] = mapped_column(ADDRESS, primary_key=True)
+    window_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("discovery_windows.id", ondelete="CASCADE")
+    )
+    block_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    kind: Mapped[str] = mapped_column(String(20))
+    mint: Mapped[str] = mapped_column(ADDRESS)
+    usd_value: Mapped[Decimal | None] = mapped_column(AMOUNT)
+
+    __table_args__ = (
+        Index("ix_discovery_observations_wallet", "wallet"),
+        CheckConstraint("kind IN ('buy', 'sell')", name="observation_kind_valid"),
+    )
+
+
+class HistoryImport(Base):
+    """Periodo del historial de una wallet que está importado **completo**.
+
+    El analizador solo calcula métricas dentro de ``[covered_from, covered_to]``.
+    """
+
+    __tablename__ = "history_imports"
+
+    wallet: Mapped[str] = mapped_column(ADDRESS, primary_key=True)
+    covered_from: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    covered_to: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # El periodo pedido era más largo, pero se alcanzó el máximo de páginas.
+    truncated: Mapped[bool] = mapped_column(Boolean)
+    transactions: Mapped[int] = mapped_column(Integer)
+    credits: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (CheckConstraint("covered_from <= covered_to", name="coverage_ordered"),)
+
+
+class WalletMetricSnapshot(Base):
+    """Métricas de una wallet calculadas solo con eventos hasta ``as_of``.
+
+    ``params_hash`` identifica la versión del analizador y sus parámetros: el mismo
+    ``as_of`` con los mismos parámetros da siempre el mismo resultado.
+    """
+
+    __tablename__ = "wallet_metric_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    wallet: Mapped[str] = mapped_column(ADDRESS)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_days: Mapped[int] = mapped_column(Integer)
+    analyzer_version: Mapped[str] = mapped_column(String(20))
+    params_hash: Mapped[str] = mapped_column(String(64))
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "wallet", "as_of", "window_days", "params_hash", name="uq_metric_snapshot"
+        ),
+        CheckConstraint("window_days > 0", name="window_positive"),
+    )
+
+
+class WalletScore(Base):
+    """Puntuación explicada de una wallet a fecha ``as_of`` (versionada)."""
+
+    __tablename__ = "wallet_scores"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    wallet: Mapped[str] = mapped_column(ADDRESS)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    scoring_version: Mapped[str] = mapped_column(String(20))
+    params_hash: Mapped[str] = mapped_column(String(64))
+    eligible: Mapped[bool] = mapped_column(Boolean)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    components: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    explanation: Mapped[list[str]] = mapped_column(JSONB)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("wallet", "as_of", "params_hash", name="uq_wallet_score"),
+        Index("ix_wallet_scores_as_of", "as_of"),
+        CheckConstraint("eligible = (score IS NOT NULL)", name="score_iff_eligible"),
+        CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="score_range"),
     )
 
 

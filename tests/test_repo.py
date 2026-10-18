@@ -41,3 +41,36 @@ async def test_usage_accumulates(repo, engine):
 async def test_heartbeat_upsert(repo):
     await repo.heartbeat("ingestor", {"ok": True})
     await repo.heartbeat("ingestor", {"ok": False})
+
+
+async def test_only_history_rows_may_lack_the_transaction_json(engine):
+    """La restricción CHECK guarda NULL de SQL (no el JSON «null») y la hace cumplir."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    from copybot.db.models import RawTransaction
+    from copybot.db.session import make_sessionmaker
+
+    now = datetime.now(UTC)
+    common = {
+        "slot": 1,
+        "block_time": now,
+        "fee_payer": W,
+        "via_fomo": True,
+        "succeeded": True,
+        "source": "helius",
+        "first_seen_at": now,
+        "fetched_at": now,
+        "payload": None,
+    }
+    sessions = make_sessionmaker(engine)
+    async with sessions.begin() as s:
+        s.add(RawTransaction(signature="h", detected_via="history", **common))
+    async with sessions() as s:
+        stored = await s.scalar(text("SELECT payload IS NULL FROM raw_transactions"))
+    assert stored is True
+    with pytest.raises(IntegrityError):
+        async with sessions.begin() as s:
+            s.add(RawTransaction(signature="l", detected_via="live", **common))

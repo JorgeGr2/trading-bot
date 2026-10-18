@@ -28,8 +28,13 @@ FORBIDDEN_PATTERNS = [
     r"seed_?phrase",
     r"\bmnemonic\b",
     r"requestAirdrop",
+    # Endpoints de Jupiter que construyen o ejecutan transacciones de swap:
+    # /swap/v1/swap, /swap/v1/swap-instructions, /v6/swap… y toda la API «Ultra»
+    # (order/execute). La cotización (/swap/v1/quote) solo lee precios y está permitida.
     r"/swap-instructions",
-    r"/swap\b",  # endpoint de Jupiter que construye transacciones de swap
+    r"/v\d+/swap\b",
+    r"/ultra/",
+    r"/execute\b",
 ]
 
 # Bibliotecas que permiten firmar transacciones de Solana.
@@ -61,3 +66,28 @@ def test_guard_detects_forbidden_code(tmp_path):
     sample = "from solders.keypair import Keypair\nclient.send_transaction(tx)\n"
     hits = [p for p in FORBIDDEN_PATTERNS if re.search(p, sample, flags=re.IGNORECASE)]
     assert len(hits) >= 2
+
+
+def _flagged(text: str) -> bool:
+    return any(re.search(p, text, flags=re.IGNORECASE) for p in FORBIDDEN_PATTERNS)
+
+
+def test_guard_blocks_every_swap_building_endpoint():
+    for url in (
+        "https://api.jup.ag/swap/v1/swap",
+        "https://lite-api.jup.ag/swap/v1/swap-instructions",
+        "https://quote-api.jup.ag/v6/swap",
+        "https://quote-api.jup.ag/v6/swap-instructions",
+        "https://api.jup.ag/ultra/v1/order",
+        "https://api.jup.ag/ultra/v1/execute",
+    ):
+        assert _flagged(url), url
+
+
+def test_guard_allows_read_only_quotes_and_prices():
+    for url in (
+        "https://api.jup.ag/swap/v1/quote",
+        "https://lite-api.jup.ag/swap/v1/quote",
+        "https://lite-api.jup.ag/price/v3",
+    ):
+        assert not _flagged(url), url

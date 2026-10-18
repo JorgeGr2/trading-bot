@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -300,6 +301,247 @@ class WalletScore(Base):
         CheckConstraint("eligible = (score IS NOT NULL)", name="score_iff_eligible"),
         CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="score_range"),
     )
+
+
+# --- Simulación (Fase 4) ---------------------------------------------------------
+
+SYSTEM_STATES = ("RECOVERING", "RUNNING", "PAUSED", "HALTED_RISK", "READ_ONLY", "STOPPED")
+BOOKS = ("portfolio", "signals")
+
+
+class ControlState(Base):
+    """Estado global del sistema (una sola fila). Fuera de RUNNING no se abren posiciones.
+
+    La comprobación se hace dentro de la misma transacción que abre la posición.
+    """
+
+    __tablename__ = "control_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str] = mapped_column(String(300), default="")
+    updated_by: Mapped[str] = mapped_column(String(40))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="control_state_single_row"),
+        CheckConstraint(f"state IN {SYSTEM_STATES}", name="control_state_valid"),
+    )
+
+
+class Signal(Base):
+    """Una compraventa de un trader seguido que el motor debe estudiar (una por evento)."""
+
+    __tablename__ = "signals"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("wallet_events.id", ondelete="RESTRICT"), unique=True
+    )
+    wallet: Mapped[str] = mapped_column(ADDRESS)
+    mint: Mapped[str] = mapped_column(ADDRESS)
+    side: Mapped[str] = mapped_column(String(4))
+    trader_token_amount: Mapped[Decimal] = mapped_column(AMOUNT)
+    trader_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    # Fracción de su posición que vende el trader (solo ventas).
+    trader_sell_fraction: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    block_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    detected_via: Mapped[str] = mapped_column(String(10))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("side IN ('buy', 'sell')", name="signal_side_valid"),
+        CheckConstraint("trader_token_amount > 0", name="signal_amount_positive"),
+    )
+
+
+class SimOrder(Base):
+    """Orden simulada. ``idempotency_key`` es única: la misma decisión nunca se repite."""
+
+    __tablename__ = "sim_orders"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    book: Mapped[str] = mapped_column(String(10))
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True)
+    signal_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("signals.id", ondelete="RESTRICT")
+    )
+    position_id: Mapped[int | None] = mapped_column(BigInteger)
+    side: Mapped[str] = mapped_column(String(4))
+    purpose: Mapped[str] = mapped_column(String(20))  # entry | copy_exit | stop_loss | max_hold…
+    mint: Mapped[str] = mapped_column(ADDRESS)
+    wallet: Mapped[str] = mapped_column(ADDRESS)  # trader copiado
+    requested_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    requested_amount: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    reserved_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))
+    status: Mapped[str] = mapped_column(String(10))
+    status_reason: Mapped[str] = mapped_column(String(300), default="")
+    decision: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(f"book IN {BOOKS}", name="order_book_valid"),
+        CheckConstraint("side IN ('buy', 'sell')", name="order_side_valid"),
+        CheckConstraint(
+            "status IN ('pending', 'filled', 'failed', 'rejected')", name="order_status_valid"
+        ),
+        CheckConstraint("reserved_usd >= 0", name="order_reserved_non_negative"),
+        Index("ix_sim_orders_status", "status"),
+    )
+
+
+class SimFill(Base):
+    """Ejecución simulada de una orden (como mucho una por orden)."""
+
+    __tablename__ = "sim_fills"
+
+    order_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("sim_orders.id", ondelete="RESTRICT"), primary_key=True
+    )
+    token_amount: Mapped[Decimal] = mapped_column(AMOUNT)
+    usd_amount: Mapped[Decimal] = mapped_column(AMOUNT)  # pagado (compra) o cobrado (venta)
+    fees_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    price_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("token_amount > 0", name="fill_amount_positive"),
+        CheckConstraint("usd_amount >= 0 AND fees_usd >= 0", name="fill_usd_non_negative"),
+    )
+
+
+class SimPosition(Base):
+    """Posición simulada de un libro en un token, copiando a un trader."""
+
+    __tablename__ = "sim_positions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    book: Mapped[str] = mapped_column(String(10))
+    mint: Mapped[str] = mapped_column(ADDRESS)
+    wallet: Mapped[str] = mapped_column(ADDRESS)
+    status: Mapped[str] = mapped_column(String(10))
+    amount: Mapped[Decimal] = mapped_column(AMOUNT)
+    cost_usd: Mapped[Decimal] = mapped_column(AMOUNT)  # coste de lo que queda
+    invested_usd: Mapped[Decimal] = mapped_column(AMOUNT)  # todo lo pagado, comisiones incluidas
+    proceeds_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))
+    realized_pnl_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))
+    rent_lamports: Mapped[int] = mapped_column(BigInteger, default=0)  # recuperable al cerrar
+    # Copia teórica: lo que habría pasado comprando y vendiendo al precio del trader.
+    theoretical_entry_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    theoretical_proceeds_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))
+    last_value_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    last_valued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unsellable: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Hay que vender (el trader vendió, o salta un stop) y aún no se ha conseguido.
+    exit_pending: Mapped[bool] = mapped_column(Boolean, default=False)
+    exit_purpose: Mapped[str | None] = mapped_column(String(20))
+    last_exit_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    entry_order_id: Mapped[int] = mapped_column(BigInteger)
+
+    __table_args__ = (
+        CheckConstraint(f"book IN {BOOKS}", name="position_book_valid"),
+        CheckConstraint("status IN ('open', 'closed')", name="position_status_valid"),
+        CheckConstraint("amount >= 0", name="position_amount_non_negative"),
+        CheckConstraint("cost_usd >= 0", name="position_cost_non_negative"),
+        CheckConstraint("status = 'open' OR amount = 0", name="closed_position_is_empty"),
+        Index(
+            "uq_open_position",
+            "book",
+            "mint",
+            "wallet",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
+
+
+class BookCash(Base):
+    """Efectivo de un libro. La base de datos impide que sea negativo."""
+
+    __tablename__ = "book_cash"
+
+    book: Mapped[str] = mapped_column(String(10), primary_key=True)
+    initial_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    cash_usd: Mapped[Decimal] = mapped_column(AMOUNT)  # disponible
+    reserved_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))  # órdenes en curso
+    peak_equity_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    day: Mapped[date] = mapped_column(Date)
+    day_start_equity_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(f"book IN {BOOKS}", name="cash_book_valid"),
+        CheckConstraint("cash_usd >= 0", name="cash_non_negative"),
+        CheckConstraint("reserved_usd >= 0", name="reserved_non_negative"),
+    )
+
+
+class LedgerEntry(Base):
+    """Diario de doble entrada: los apuntes de cada operación suman cero."""
+
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    book: Mapped[str] = mapped_column(String(10))
+    order_id: Mapped[int | None] = mapped_column(BigInteger)
+    position_id: Mapped[int | None] = mapped_column(BigInteger)
+    account: Mapped[str] = mapped_column(String(20))  # cash | reserved | position | fees | pnl
+    delta_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    memo: Mapped[str] = mapped_column(String(200), default="")
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "account IN ('cash', 'reserved', 'position', 'fees', 'pnl', 'capital')",
+            name="ledger_account_valid",
+        ),
+        Index("ix_ledger_order", "order_id"),
+    )
+
+
+class PortfolioSnapshot(Base):
+    __tablename__ = "portfolio_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    book: Mapped[str] = mapped_column(String(10))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cash_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    positions_value_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    equity_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    open_positions: Mapped[int] = mapped_column(Integer)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+    __table_args__ = (Index("ix_portfolio_snapshots_book_at", "book", "at"),)
+
+
+class RiskEvent(Base):
+    __tablename__ = "risk_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    book: Mapped[str | None] = mapped_column(String(10))
+    kind: Mapped[str] = mapped_column(String(40))
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+
+class TokenSafetyCheck(Base):
+    """Resultado de los filtros de seguridad de un token en un momento."""
+
+    __tablename__ = "token_safety_checks"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    mint: Mapped[str] = mapped_column(ADDRESS)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    passed: Mapped[bool] = mapped_column(Boolean)
+    reasons: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+    __table_args__ = (Index("ix_token_safety_mint_at", "mint", "checked_at"),)
 
 
 class ProviderUsage(Base):

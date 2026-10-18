@@ -1,0 +1,41 @@
+{
+ "lamports": 3422822817,
+ "data": {
+  "program": "spl-token-2022",
+  "parsed": {
+   "info": {
+    "decimals": 6,
+    "extensions": [
+     {
+      "extension": "metadataPointer",
+      "state": {
+       "authority": null,
+       "metadataAddress": "GTBxUiw6wJdmmkCGZgRHLyYxqu1vG4KtRpeox6yDpump"
+      }
+     },
+     {
+      "extension": "tokenMetadata",
+      "state": {
+       "additionalMetadata": [],
+       "mint": "GTBxUiw6wJdmmkCGZgRHLyYxqu1vG4KtRpeox6yDpump",
+       "name": "Jean Phil",
+       "symbol": "JEANPHIL",
+       "updateAuthority": null,
+       "uri": "https://ipfs.io/ipfs/QmZ5DoDK7cuNdH2WtoLzNqZD1daDjsnyEqTZzzYgR9hA3S"
+      }
+     }
+    ],
+    "freezeAuthority": null,
+    "isInitialized": true,
+    "mintAuthority": null,
+    "supply": "969471259771721"
+   },
+   "type": "mint"
+  },
+  "space": 402
+ },
+ "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+ "executable": false,
+ "rentEpoch": 18446744073709551615,
+ "space": 402
+}

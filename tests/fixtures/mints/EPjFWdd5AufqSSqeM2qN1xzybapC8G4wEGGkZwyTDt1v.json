@@ -1,0 +1,21 @@
+{
+ "lamports": 556436563008,
+ "data": {
+  "program": "spl-token",
+  "parsed": {
+   "info": {
+    "decimals": 6,
+    "freezeAuthority": "7dGbd2QZcCKcTndnHcTL8q7SMVXAkp688NTQYwrRCrar",
+    "isInitialized": true,
+    "mintAuthority": "BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG",
+    "supply": "7696593404595050"
+   },
+   "type": "mint"
+  },
+  "space": 82
+ },
+ "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+ "executable": false,
+ "rentEpoch": 18446744073709551615,
+ "space": 82
+}

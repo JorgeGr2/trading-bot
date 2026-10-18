@@ -1,0 +1,59 @@
+{
+ "lamports": 27432150101,
+ "data": {
+  "program": "spl-token-2022",
+  "parsed": {
+   "info": {
+    "decimals": 6,
+    "extensions": [
+     {
+      "extension": "metadataPointer",
+      "state": {
+       "authority": null,
+       "metadataAddress": "DEW9dSN6QpWyNthphCpMmAbZP1Q4cEKR9xQXAri98WDP"
+      }
+     },
+     {
+      "extension": "transferFeeConfig",
+      "state": {
+       "newerTransferFee": {
+        "epoch": 1039,
+        "maximumFee": 1000000000000000,
+        "transferFeeBasisPoints": 100
+       },
+       "olderTransferFee": {
+        "epoch": 1039,
+        "maximumFee": 1000000000000000,
+        "transferFeeBasisPoints": 100
+       },
+       "transferFeeConfigAuthority": "5KXDF6QnqhBj72hDtJNkkpFaQVUfbFXNybMsp3DiK6tD",
+       "withdrawWithheldAuthority": "5KXDF6QnqhBj72hDtJNkkpFaQVUfbFXNybMsp3DiK6tD",
+       "withheldAmount": 2705165390
+      }
+     },
+     {
+      "extension": "tokenMetadata",
+      "state": {
+       "additionalMetadata": [],
+       "mint": "DEW9dSN6QpWyNthphCpMmAbZP1Q4cEKR9xQXAri98WDP",
+       "name": "Super Inu",
+       "symbol": "SI",
+       "updateAuthority": "WLHv2UAZm6z4KyaaELi5pjdbJh6RESMva1Rnn8pJVVh",
+       "uri": "https://m.rapidlaunch.io/m/if5VgbxOC"
+      }
+     }
+    ],
+    "freezeAuthority": null,
+    "isInitialized": true,
+    "mintAuthority": null,
+    "supply": "995756339669228"
+   },
+   "type": "mint"
+  },
+  "space": 477
+ },
+ "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+ "executable": false,
+ "rentEpoch": 18446744073709551615,
+ "space": 477
+}

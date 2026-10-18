@@ -10,7 +10,7 @@
   - En el 100 % de la muestra, una wallet de FOMO firma y paga la transacción, y el trader aparece como **segundo firmante**.
   - El bot atribuye cada operación a quien cambia de saldo, no a quien paga, y acierta en todas las compraventas de la muestra.
 - **Las operaciones se detectan en vivo con un retraso mediano de 1,1 s** respecto al bloque (percentil 95: 1,6 s), usando el WebSocket público gratuito.
-- **El monitor sigue wallets, guarda cada operación, se recupera de cortes y reinicios** y no duplica nada. Lo prueban 93 tests automáticos y dos pruebas en vivo con traders reales.
+- **El monitor sigue wallets, guarda cada operación, se recupera de cortes y reinicios** y no duplica nada. Lo prueban 100 tests automáticos y tres pruebas en vivo con traders reales.
 - **Hallazgos que afectan a la estrategia:**
   - Algunos tokens que compran los usuarios de FOMO cobran un 1 % en cada transferencia, y su creador puede subir esa comisión.
   - FOMO cobra a sus usuarios entre un 0,2 % y un 9,5 % por operación (mínimo de 0,10 $).
@@ -97,7 +97,7 @@ A esto hay que sumar la descarga de la transacción completa, porque `logsSubscr
 | `src/copybot/logging.py` | Logs JSON con ocultación de claves, contraseñas y tokens |
 | `src/copybot/cli.py` | `copybot wallets add/list`, `copybot monitor` |
 | `scripts/spike_*.py` | Verificación reproducible con datos reales |
-| `tests/` | 93 tests, con 7 transacciones reales de FOMO como *fixtures* |
+| `tests/` | 100 tests, con 7 transacciones reales de FOMO como *fixtures* |
 
 **Reglas que garantiza el monitor:**
 
@@ -110,7 +110,7 @@ A esto hay que sumar la descarga de la transacción completa, porque `logsSubscr
 
 ```
 $ uv run pytest
-93 passed
+100 passed
 
 $ uv run ruff check src tests scripts migrations
 All checks passed!
@@ -136,7 +136,13 @@ Se siguieron 10 traders de la muestra con el monitor completo (RPC y WebSocket p
 - **Primera ejecución:** uno de los traders operó a los pocos segundos. El RPC público respondió 429 cinco veces seguidas y **el monitor se detuvo**. Es un fallo real. Corregido: ahora el error se registra y la operación se recupera en la siguiente pasada. Hay tests nuevos que lo cubren.
 - **Segunda ejecución:** al arrancar desde el *checkpoint* anterior, el monitor **recuperó automáticamente las 4 operaciones** que ese trader hizo mientras estaba parado, entre ellas la que provocó el fallo. Las 4 se clasificaron como compraventas de confianza alta en USDC y se marcaron como `backfill`.
 
-RESULTADOS_SMOKE
+- **Segunda ejecución, 10 minutos completos.** La detuvo el temporizador de la prueba (código 124), no un fallo.
+  - 16 transacciones de 4 de los 10 traders: 11 detectadas en vivo y 5 recuperadas (las 4 del parón y 1 que el proveedor no dejó descargar en vivo).
+  - 15 compraventas de confianza alta, todas en USDC.
+  - 1 «transferencia recibida»: un reparto automático de pump.fun a los poseedores de un token (`DistributeFeeToHolders`). Revisada a mano: la clasificación es correcta y **no es una compra**.
+  - El RPC público rechazó 3 descargas tras agotar los reintentos. El monitor siguió funcionando y las recogió después.
+  - La latencia anotada (mediana 9,9 s, máximo 74 s) estaba **inflada por un error de medición** (apartado 6), ya corregido.
+- **Tercera ejecución, con el código corregido.** RESULTADOS_SMOKE3
 
 ## 6. Problemas encontrados y corregidos
 
@@ -146,6 +152,8 @@ RESULTADOS_SMOKE
 | `httpx` escribía en los logs la URL completa del proveedor, que con Helius incluye la clave | Revisión de los logs de la prueba en vivo | Logs de `httpx` silenciados y filtro de secretos en todos los logs, con test |
 | Las compras con polvo de la ruta quedaban marcadas como ambiguas | Verificación con dos métodos | Umbral de polvo, con test sobre la transacción real |
 | Una latencia anómala podía desbordar la columna (`int32`) | Test | Columna `BIGINT` |
+| Los avisos en vivo se leían solo cuando terminaba de procesarse el anterior, así que su hora de llegada se anotaba tarde y la latencia salía inflada (hasta 74 s) | Prueba en vivo | Lectura en una tarea aparte, con test. Además se guarda `fetched_at` (cuándo se tuvo la transacción completa) |
+| Un JSON con forma inesperada podía lanzar un error no previsto y detener el monitor | Revisión del código | El clasificador solo lanza `MalformedTransactionError`, con tests de 5 deformaciones |
 | Las peticiones con versión 0 fallaban en transacciones nuevas | Datos reales | `maxSupportedTransactionVersion: 1` |
 
 ## 7. Limitaciones y problemas abiertos

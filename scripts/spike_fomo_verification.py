@@ -51,11 +51,13 @@ def rpc(url: str, method: str, params: list[Any]) -> Any:
     raise RuntimeError(f"{method}: demasiados reintentos")
 
 
-def fetch(url: str, cache: Path, n: int, gap: float) -> None:
+def fetch(url: str, cache: Path, n: int, gap: float, stride: int = 1) -> None:
+    """Descarga ``n`` transacciones, tomando una de cada ``stride`` para repartir la
+    muestra en el tiempo (con ``stride`` 10 y ``n`` 100 cubre las últimas 1000)."""
     cache.mkdir(parents=True, exist_ok=True)
-    sigs = rpc(url, "getSignaturesForAddress", [RELAYER, {"limit": min(n, 1000)}])
+    sigs = rpc(url, "getSignaturesForAddress", [RELAYER, {"limit": min(n * stride, 1000)}])
     (cache / "_signatures.json").write_text(json.dumps(sigs))
-    for s in sigs:
+    for s in sigs[::stride][:n]:
         if s["err"] is not None:
             continue
         path = cache / f"{s['signature']}.json"
@@ -133,9 +135,10 @@ def main() -> int:
     ap.add_argument("--fetch", type=int, default=0)
     ap.add_argument("--rpc-url", default="https://api.mainnet-beta.solana.com")
     ap.add_argument("--gap", type=float, default=3.0)
+    ap.add_argument("--stride", type=int, default=1)
     args = ap.parse_args()
     if args.fetch:
-        fetch(args.rpc_url, args.cache_dir, args.fetch, args.gap)
+        fetch(args.rpc_url, args.cache_dir, args.fetch, args.gap, args.stride)
 
     relayers = frozenset({RELAYER})
     files = sorted(p for p in args.cache_dir.glob("*.json") if not p.name.startswith("_"))

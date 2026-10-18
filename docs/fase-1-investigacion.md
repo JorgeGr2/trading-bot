@@ -50,6 +50,8 @@ Para la Fase 2 necesito una de estas dos cosas: que habilites en el entorno de d
 | FOMO patrocina el gas («gasless») y cobra comisión por swap. Opera también en EVM y en perpetuos vía Hyperliquid. | Prensa / reseñas | V0 |
 | fomoapi.io se describe como API **independiente y no oficial**. Hay al menos tres dominios con productos parecidos (fomoapi.io, fomoapi.family, getfomoapi.fun) y ninguno documenta de dónde obtiene los datos. | Sus propias webs | V0 |
 
+> **Actualización (Fase 2, 18-oct-2026):** verificado on-chain con transacciones reales. El relayer firma y paga el 100 % de la muestra, y **el trader aparece como segundo firmante**, así que se puede identificar sin ambigüedad. Las compraventas se pagan y cobran en USDC. Detalles en [`docs/informes/fase-2.md`](informes/fase-2.md).
+
 **Consecuencias de diseño**
 
 - El monitor atribuye cada operación por el **cambio neto de balances de las cuentas de token cuyo *owner* es la wallet seguida**, nunca por el firmante.
@@ -321,7 +323,7 @@ Cálculo ilustrativo con SOL ≈ 100 $. El sistema usará el precio real en cada
 
 | Coste | Magnitud | Peso en una posición de 10 $ |
 |---|---|---|
-| Renta de la cuenta de token (ATA) al comprar un token nuevo | 0,00203928 SOL ≈ 0,20 $ (recuperable al cerrar la cuenta) | ~2 % inmovilizado |
+| Renta de la cuenta de token (ATA) al comprar un token nuevo | 0,00148844 SOL ≈ 0,15 $ (recuperable al cerrar la cuenta). Medido on-chain en la Fase 2 con `getMinimumBalanceForRentExemption(165)`; la cifra antigua, 0,00203928 SOL, ya no es válida. | ~1,5 % inmovilizado |
 | Comisión base | 0,000005 SOL por firma | Despreciable |
 | *Priority fee* / propina Jito competitiva | 0,0001–0,001+ SOL por transacción | 0,1–1 % por lado |
 | Comisión de pool | ~1 % en la *bonding curve* de pump.fun; ~0,25–0,3 % en PumpSwap, más una comisión de creador variable (fuentes secundarias) | 0,5–2 % ida y vuelta |

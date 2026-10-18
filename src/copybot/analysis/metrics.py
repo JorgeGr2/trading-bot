@@ -9,9 +9,11 @@ media por operación** (cada operación pesa lo mismo), no el PnL en dólares de
 que dominan sus apuestas más grandes. Por eso se calculan las dos.
 
 La serie **prudente** de rentabilidades incluye también las posiciones abandonadas
-(abiertas y sin movimiento desde hace más de ``stale_open_hours``), valorando a 0 lo
-que queda. Sin ellas, quien vende sus aciertos y se queda con las pérdidas parecería
-rentable: solo se verían las operaciones que cerró.
+(abiertas y sin movimiento desde hace más de ``stale_open_hours``). Lo que queda se
+valora a lo que se obtendría vendiéndolo a fecha ``as_of`` según el precio y la
+liquidez observados antes de esa fecha, o a 0 si no hay precio. Sin ellas, quien vende
+sus aciertos y se queda con las pérdidas parecería rentable: solo se verían las
+operaciones que cerró.
 """
 
 from __future__ import annotations
@@ -29,7 +31,8 @@ from copybot.analysis.positions import ZERO, Ledger, RoundTrip, Trade, build_led
 
 # Cambiarla cuando cambie el cálculo: forma parte del params_hash de los snapshots.
 # 2: serie prudente con las posiciones abandonadas; abandono según la última actividad.
-ANALYZER_VERSION = "2"
+# 3: lo que queda en las abandonadas se valora a su valor de venta (precio y liquidez).
+ANALYZER_VERSION = "3"
 
 
 class AnalysisParams(BaseSettings):
@@ -49,6 +52,8 @@ class AnalysisParams(BaseSettings):
     early_buy_seconds: int = Field(default=60, gt=0, le=3600)
     # Para la media robusta, la rentabilidad de cada operación se limita a +200 %.
     return_clip: Decimal = Field(default=Decimal("2"), gt=0, le=100)
+    # Antigüedad máxima de un precio para valorar una posición abierta en ``as_of``.
+    price_max_age_minutes: int = Field(default=120, gt=0, le=24 * 60)
     # Margen para considerar que el historial importado llega hasta ``as_of``.
     coverage_tolerance_minutes: int = Field(default=60, ge=0, le=24 * 60)
 
@@ -116,6 +121,8 @@ class WindowMetrics:
     open_positions: int
     open_cost_usd: Decimal
     stale_open_cost_usd: Decimal
+    abandoned_value_usd: Decimal  # valor de venta estimado de lo abandonado
+    abandoned_priced: int  # abandonadas con precio conocido (las demás, a 0)
     conservative_pnl_usd: Decimal
     # Calidad de los datos y comportamientos dudosos
     unmatched_sell_usd: Decimal
@@ -143,6 +150,16 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def realizable_value(amount: Decimal, price: Decimal | None, liquidity: Decimal | None) -> Decimal:
+    """Lo que se obtendría vendiendo ``amount`` tokens contra un pool de producto constante
+    con ``liquidity`` USD (la mitad en la moneda de pago). Sin precio o liquidez: 0."""
+    if price is None or liquidity is None or price <= 0 or liquidity <= 0 or amount <= 0:
+        return ZERO
+    at_mid = amount * price
+    quote_side = liquidity / 2
+    return quote_side * at_mid / (quote_side + at_mid)
+
+
 def _median(values: list[Decimal]) -> Decimal | None:
     return statistics.median(values) if values else None
 
@@ -167,8 +184,11 @@ def compute_window_metrics(
     params: AnalysisParams,
     coverage: Coverage | None,
     token_created_at: dict[str, datetime | None] | None = None,
+    open_values: dict[str, Decimal] | None = None,
     ledger: Ledger | None = None,
 ) -> WindowMetrics:
+    """``open_values``: valor de venta en ``as_of`` de lo que queda en cada token abierto
+    (lo calcula quien llama con precios observados antes de ``as_of``)."""
     if window_days <= 0:
         raise ValueError("window_days debe ser positivo")
     known = [t for t in trades if t.time <= as_of]
@@ -219,6 +239,8 @@ def compute_window_metrics(
         if in_window(t.opened_at) and (t.last_activity_at or t.opened_at) < stale_limit
     ]
     stale_cost = sum((t.remaining_cost for t in abandoned), ZERO)
+    values = open_values or {}
+    abandoned_value = sum((values.get(t.mint, ZERO) for t in abandoned), ZERO)
     prudent: list[tuple[datetime, Decimal]] = [
         (t.closed_at, min(t.roi, params.return_clip))
         for t in closed
@@ -227,7 +249,7 @@ def compute_window_metrics(
     prudent += [
         (t.last_activity_at or t.opened_at, min(roi, params.return_clip))
         for t in abandoned
-        if (roi := t.abandoned_roi) is not None
+        if (roi := t.abandoned_roi(values.get(t.mint, ZERO))) is not None
     ]
     prudent_values = [r for _, r in prudent]
     first_half = [r for moment, r in prudent if moment <= mid]
@@ -305,7 +327,9 @@ def compute_window_metrics(
         open_positions=len(open_trips),
         open_cost_usd=sum((t.remaining_cost for t in open_trips), ZERO),
         stale_open_cost_usd=stale_cost,
-        conservative_pnl_usd=pnl - stale_cost,
+        abandoned_value_usd=abandoned_value,
+        abandoned_priced=sum(1 for t in abandoned if t.mint in values),
+        conservative_pnl_usd=pnl - stale_cost + abandoned_value,
         unmatched_sell_usd=unmatched,
         unmatched_sell_share=unmatched / sell_volume if sell_volume > 0 else None,
         free_tokens_sold_usd=sum(

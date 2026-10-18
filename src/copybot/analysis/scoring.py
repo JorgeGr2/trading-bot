@@ -33,7 +33,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from copybot.analysis.metrics import ANALYZER_VERSION, AnalysisParams, WindowMetrics
 
 # 2: ventaja y consistencia con la serie prudente (incluye las posiciones abandonadas) y
-#    robustez «sin las 3 mejores» por operación, no en dólares.
+#    robustez «sin las 3 mejores» por operación, no en dólares; el riesgo usa la pérdida
+#    en las abandonadas (coste menos valor de venta).
 SCORING_VERSION = "2"
 
 
@@ -242,9 +243,10 @@ def score_wallet(m: WindowMetrics, recent: WindowMetrics, p: ScoringParams) -> S
         "peso": None,
         "detalle": (
             f"rentabilidad media por operación cerrada {_pct(m.mean_return)}; con un tope "
-            f"por operación (media robusta): {_pct(m.clipped_mean_return)}; contando como "
-            f"pérdida lo que queda en {m.abandoned_round_trips} posiciones abandonadas: "
-            f"{_pct(m.prudent_mean_return)}; estimación prudente {_pct(lb)}; tras restar el "
+            f"por operación (media robusta): {_pct(m.clipped_mean_return)}; incluyendo "
+            f"{m.abandoned_round_trips} posiciones abandonadas a su valor de venta actual "
+            f"({m.abandoned_priced} con precio, el resto a 0): {_pct(m.prudent_mean_return)}; "
+            f"estimación prudente {_pct(lb)}; tras restar el "
             f"coste estimado de copiar ({p.copy_cost:.0%}): {_pct(net)} "
             f"(vale 1 con {_pct(p.target_edge)})"
         ),
@@ -293,17 +295,16 @@ def score_wallet(m: WindowMetrics, recent: WindowMetrics, p: ScoringParams) -> S
         if m.max_drawdown_pct is not None
         else Decimal(0)
     )
-    stale_ratio = (
-        _clamp(m.stale_open_cost_usd / m.buy_volume_usd) if m.buy_volume_usd > 0 else Decimal(0)
-    )
+    stale_loss = max(m.stale_open_cost_usd - m.abandoned_value_usd, Decimal(0))
+    stale_ratio = _clamp(stale_loss / m.buy_volume_usd) if m.buy_volume_usd > 0 else Decimal(0)
     result.components["riesgo"] = {
         "valor": dd_value * (1 - stale_ratio),
         "peso": weights["riesgo"],
         "detalle": (
             f"caída máxima del PnL realizado {m.max_drawdown_usd:.2f} $ "
             f"({_pct_plain(m.max_drawdown_pct)} del capital máximo invertido, "
-            f"{m.peak_open_cost_usd:.2f} $); posiciones abandonadas {m.stale_open_cost_usd:.2f} $ "
-            f"({stale_ratio:.0%} de lo comprado)"
+            f"{m.peak_open_cost_usd:.2f} $); pérdida en posiciones abandonadas "
+            f"{stale_loss:.2f} $ ({stale_ratio:.0%} de lo comprado)"
         ),
     }
 
@@ -413,9 +414,10 @@ def _flags(m: WindowMetrics, p: ScoringParams) -> list[Flag]:
             Flag(
                 "posiciones_abandonadas",
                 "media",
-                f"mantiene sin vender {m.stale_open_cost_usd:.2f} $ comprados hace más de 72 h: "
-                f"su PnL realizado ({m.realized_pnl_usd:.2f} $) puede ser engañoso; con esas "
-                f"posiciones a 0 sería {m.conservative_pnl_usd:.2f} $",
+                f"mantiene sin vender {m.stale_open_cost_usd:.2f} $ comprados hace más de 72 h, "
+                f"que hoy valdrían unos {m.abandoned_value_usd:.2f} $ al venderlos: su PnL "
+                f"realizado ({m.realized_pnl_usd:.2f} $) es engañoso; contándolas sería "
+                f"{m.conservative_pnl_usd:.2f} $",
             )
         )
     if m.unmatched_sell_share is not None and m.unmatched_sell_share > Decimal("0.1"):

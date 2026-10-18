@@ -7,7 +7,7 @@ copybot discover add <wallet> ... [--file F] [--source leaderboard|manual] [--la
 copybot discover import [--top N | --wallet W ... | --activity MIN:MAX --sample N |
                          --source leaderboard|manual] [--days D]
 copybot discover run [--windows N] [--days D] [--top N] [--token-lookups N]
-copybot analyze [--wallet W ...] [--as-of FECHA] [--token-lookups N]
+copybot analyze [--wallet W ...] [--as-of FECHA | --prices] [--token-lookups N]
 copybot traders ranking [--limit N]
 copybot traders show <wallet>
 """
@@ -34,6 +34,7 @@ from copybot.db.repo import Repository
 from copybot.db.session import make_engine, make_sessionmaker
 from copybot.ingest.discovery import ActivityScreener, RelayerSampler, TokenCreationLookup
 from copybot.ingest.history import HistoryImporter
+from copybot.ingest.prices import JupiterPrices, PriceRefresher
 from copybot.solana.addresses import validate_address
 from copybot.solana.rpc import HELIUS_CREDITS_PER_REQUEST, RpcError, SolanaRpc
 
@@ -84,6 +85,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     ana = sub.add_parser("analyze", help="calcular métricas y puntuaciones")
     ana.add_argument("--wallet", action="append", default=[])
     ana.add_argument("--as-of", help="fecha ISO 8601 en UTC (por defecto, ahora)")
+    ana.add_argument(
+        "--prices",
+        action="store_true",
+        help="valorar las posiciones abiertas con el precio actual de Jupiter (gratis)",
+    )
     ana.add_argument(
         "--token-lookups",
         type=int,
@@ -279,20 +285,40 @@ async def import_histories(ctx: Context, wallets: list[str], days: int | None = 
 
 
 async def analyze(
-    ctx: Context, wallets: list[str], as_of: datetime, token_lookups: int
+    ctx: Context,
+    wallets: list[str],
+    as_of: datetime | None,
+    token_lookups: int,
+    prices: bool = False,
 ) -> list[WalletAnalysis]:
+    """Analiza a fecha ``as_of`` (``None``: ahora). Con ``prices``, antes pide a Jupiter el
+    precio actual de las posiciones abiertas y analiza justo después, para que esos
+    precios sean anteriores a ``as_of``."""
+    if prices and as_of is not None:
+        raise SystemExit("--prices usa precios actuales: no se puede combinar con --as-of")
     analyzer = _analyzer(ctx)
     lookup = TokenCreationLookup(ctx.rpc, ctx.repo) if ctx.rpc and token_lookups else None
-    results = []
-    for wallet in wallets:
-        if lookup is not None:
+    provisional = as_of or parse_as_of(None)
+    if lookup is not None:
+        for wallet in wallets:
             try:
-                mints = await analyzer.opened_mints(wallet, as_of)
+                mints = await analyzer.opened_mints(wallet, provisional)
                 await lookup.ensure(mints, max_lookups=token_lookups)
             except BudgetExceededError as exc:
                 print(f"Sin presupuesto para más fechas de creación: {exc}")
-                lookup = None
-        results.append(await analyzer.analyze(wallet, as_of))
+                break
+    if prices:
+        open_mints: set[str] = set()
+        for wallet in wallets:
+            open_mints.update(await analyzer.open_mints(wallet, provisional))
+        client = JupiterPrices()
+        try:
+            asked = await PriceRefresher(client, ctx.repo).refresh(open_mints)
+        finally:
+            await client.aclose()
+        print(f"Precios de Jupiter: {asked} tokens con posición abierta consultados.")
+    as_of = as_of or parse_as_of(None)
+    results = [await analyzer.analyze(wallet, as_of) for wallet in wallets]
     eligible = sorted(
         (r for r in results if r.score.eligible), key=lambda r: r.score.score, reverse=True
     )
@@ -323,7 +349,7 @@ async def ranking(ctx: Context, limit: int) -> None:
     def order(row: tuple) -> tuple:
         # Puntuables primero; a igual puntuación (p. ej. 0), mejor rentabilidad media.
         s, m = row
-        mean = m.get("clipped_mean_return")
+        mean = m.get("prudent_mean_return")
         return (
             not s.eligible,
             -(s.score if s.score is not None else Decimal(-1)),
@@ -335,7 +361,7 @@ async def ranking(ctx: Context, limit: int) -> None:
         w: c.source for w, c in (await ctx.repo.candidate_info(r[0].wallet for r in rows)).items()
     }
     print(
-        f"{'#':>3}  {'wallet':44}  {'origen':11}  {'puntos':>6}  {'oper.':>5}  {'media/op':>9}  "
+        f"{'#':>3}  {'wallet':44}  {'origen':11}  {'puntos':>6}  {'oper.':>5}  {'prudente':>9}  "
         f"{'1ª venta':>9}  motivo de exclusión"
     )
     for i, (s, m) in enumerate(rows[:limit], start=1):
@@ -346,7 +372,7 @@ async def ranking(ctx: Context, limit: int) -> None:
         source = origin.get(s.wallet, "relayer")
         print(
             f"{i:3}  {s.wallet:44}  {source:11}  {points:>6}  {m.get('round_trips', 0):5}  "
-            f"{_fmt_pct(m.get('clipped_mean_return')):>9}  {first_txt:>9}  {reason}"
+            f"{_fmt_pct(m.get('prudent_mean_return')):>9}  {first_txt:>9}  {reason}"
         )
 
 
@@ -448,13 +474,14 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                     print(f"Importando el historial de {len(candidates)} candidatas…")
                     await import_histories(ctx, [c.wallet for c in candidates])
                     wallets = [w.wallet for w in await ctx.repo.imported_wallets()]
-                    await analyze(ctx, wallets, parse_as_of(None), args.token_lookups)
+                    await analyze(ctx, wallets, None, args.token_lookups, prices=True)
                     await ranking(ctx, args.top)
             elif args.command == "analyze":
                 wallets = [validate_address(w) for w in args.wallet] or [
                     w.wallet for w in await ctx.repo.imported_wallets()
                 ]
-                await analyze(ctx, wallets, parse_as_of(args.as_of), args.token_lookups)
+                as_of = parse_as_of(args.as_of) if args.as_of else None
+                await analyze(ctx, wallets, as_of, args.token_lookups, prices=args.prices)
             elif args.action == "ranking":
                 await ranking(ctx, args.limit)
             else:

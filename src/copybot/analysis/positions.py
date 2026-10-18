@@ -117,13 +117,13 @@ class RoundTrip:
     def roi(self) -> Decimal | None:
         return self.pnl / self.priced_cost if self.priced_cost > 0 else None
 
-    @property
-    def abandoned_roi(self) -> Decimal | None:
-        """Rentabilidad de una operación abierta si lo que queda vale 0 (criterio prudente)."""
+    def abandoned_roi(self, remaining_value: Decimal = ZERO) -> Decimal | None:
+        """Rentabilidad de una operación abierta si lo que queda vale ``remaining_value``
+        (lo que se obtendría vendiéndolo; 0 por defecto, criterio prudente)."""
         basis = self.cost + self.remaining_cost
         if self.closed or basis <= 0:
             return None
-        return (self.proceeds - basis) / basis
+        return (self.proceeds + remaining_value - basis) / basis
 
     @property
     def hold_seconds(self) -> Decimal | None:

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import Numeric, Row, case, cast, distinct, func, literal_column, select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import distinct_on, insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from copybot.db.models import (
@@ -22,6 +22,7 @@ from copybot.db.models import (
     RawTransaction,
     ServiceHeartbeat,
     Token,
+    TokenPrice,
     TrackedWallet,
     WalletMetricSnapshot,
     WalletScore,
@@ -558,6 +559,55 @@ class Repository:
                 },
             )
             await s.execute(stmt)
+
+    async def save_token_prices(
+        self,
+        quotes: dict[str, tuple[Decimal | None, Decimal | None]],
+        *,
+        observed_at: datetime,
+        source: str,
+    ) -> None:
+        rows = [
+            {
+                "mint": mint,
+                "observed_at": observed_at,
+                "usd_price": price,
+                "liquidity_usd": liquidity,
+                "source": source,
+            }
+            for mint, (price, liquidity) in quotes.items()
+        ]
+        async with self._sessions.begin() as s:
+            for chunk in _chunks(rows, 500):
+                await s.execute(
+                    insert(TokenPrice)
+                    .values(chunk)
+                    .on_conflict_do_nothing(index_elements=["mint", "observed_at"])
+                )
+
+    async def token_prices_at(
+        self, mints: Iterable[str], *, as_of: datetime, max_age: timedelta
+    ) -> dict[str, tuple[Decimal | None, Decimal | None]]:
+        """El precio más reciente de cada token observado en ``[as_of − max_age, as_of]``.
+
+        Nunca devuelve precios observados después de ``as_of``.
+        """
+        mints = list(set(mints))
+        if not mints:
+            return {}
+        stmt = (
+            select(TokenPrice.mint, TokenPrice.usd_price, TokenPrice.liquidity_usd)
+            .where(
+                TokenPrice.mint.in_(mints),
+                TokenPrice.observed_at <= as_of,
+                TokenPrice.observed_at >= as_of - max_age,
+            )
+            .order_by(TokenPrice.mint, TokenPrice.observed_at.desc())
+            .ext(distinct_on(TokenPrice.mint))
+        )
+        async with self._sessions() as s:
+            rows = (await s.execute(stmt)).all()
+        return {r.mint: (r.usd_price, r.liquidity_usd) for r in rows}
 
     # --- Análisis -------------------------------------------------------------------
 

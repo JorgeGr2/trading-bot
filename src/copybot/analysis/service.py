@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from copybot.analysis.metrics import (
@@ -13,6 +13,7 @@ from copybot.analysis.metrics import (
     Coverage,
     WindowMetrics,
     compute_window_metrics,
+    realizable_value,
 )
 from copybot.analysis.positions import USD_QUOTES, Trade, build_ledger
 from copybot.analysis.scoring import (
@@ -95,10 +96,27 @@ class TraderAnalyzer:
             {t.mint for t in ledger.round_trips if t.buys and t.opened_at.timestamp() > start}
         )
 
+    async def open_mints(self, wallet: str, as_of: datetime) -> list[str]:
+        """Tokens con posición abierta en ``as_of`` (para pedir su precio antes de analizar)."""
+        trades, _ = await self.load(wallet, as_of)
+        ledger = build_ledger(trades, as_of, self._analysis.close_tolerance)
+        return sorted({t.mint for t in ledger.open_trips()})
+
     async def analyze(self, wallet: str, as_of: datetime, *, save: bool = True) -> WalletAnalysis:
         trades, coverage = await self.load(wallet, as_of)
         created = await self._repo.token_creation_times({t.mint for t in trades if t.mint})
         ledger = build_ledger(trades, as_of, self._analysis.close_tolerance)
+        open_trips = ledger.open_trips()
+        prices = await self._repo.token_prices_at(
+            {t.mint for t in open_trips},
+            as_of=as_of,
+            max_age=timedelta(minutes=self._analysis.price_max_age_minutes),
+        )
+        open_values = {
+            t.mint: realizable_value(t.remaining_amount, *prices[t.mint])
+            for t in open_trips
+            if t.mint in prices
+        }
         windows = {}
         for days in sorted({self._scoring.window_days, self._scoring.recent_window_days}):
             windows[days] = compute_window_metrics(
@@ -108,6 +126,7 @@ class TraderAnalyzer:
                 params=self._analysis,
                 coverage=coverage,
                 token_created_at=created,
+                open_values=open_values,
                 ledger=ledger,
             )
         main = windows[self._scoring.window_days]

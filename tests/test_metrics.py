@@ -137,3 +137,24 @@ def test_recent_activity_means_not_abandoned():
     # Y: coste 10, vendió la mitad por 20 y el resto (coste 5) vale 0 → (20 − 10) / 10
     assert m.prudent_mean_return == Decimal(1)
     assert m.stale_open_cost_usd == 5
+
+
+def test_realizable_value_against_constant_product_pool():
+    from copybot.analysis.metrics import realizable_value
+
+    # 1.000 tokens a 0,01 $ = 10 $ contra un pool de 100 $ (50 $ en la moneda de pago):
+    # se obtienen 50 · 10 / (50 + 10) = 8,33 $.
+    assert realizable_value(Decimal(1000), Decimal("0.01"), Decimal(100)) == Decimal(
+        50 * 10
+    ) / Decimal(60)
+    assert realizable_value(Decimal(1000), None, Decimal(100)) == 0
+    assert realizable_value(Decimal(1000), Decimal("0.01"), None) == 0
+    assert realizable_value(Decimal(1000), Decimal("0.01"), Decimal(0)) == 0
+
+
+def test_abandoned_position_valued_at_its_sale_value():
+    # G (coste 4 $) vale hoy 2 $ al venderla: rentabilidad (0 + 2 − 4) / 4 = −50 %.
+    m = metrics(open_values={"G": Decimal(2)})
+    assert m.prudent_mean_return == (Decimal("-0.1") + Decimal("0.99") + Decimal("-0.5")) / 3
+    assert (m.abandoned_value_usd, m.abandoned_priced) == (2, 1)
+    assert m.conservative_pnl_usd == Decimal("48.5") - 4 + 2

@@ -133,3 +133,39 @@ async def test_wallet_without_imported_history_is_not_scored(repo):
     result = await analyzer.analyze(W, AS_OF, save=False)
     assert not result.score.eligible
     assert not result.main.coverage_complete
+
+
+async def test_abandoned_position_uses_only_prices_seen_before_as_of(repo):
+    """Una compra sin vender de hace 10 días se valora con el precio observado antes de
+    as_of; un precio posterior (aunque sea mucho mayor) no cuenta."""
+    from tests.fakes import fomo_like_swap
+
+    analyzer = await prepared(repo)
+    bag = fomo_like_swap(
+        "bag00",
+        99_000,
+        W,
+        token_raw_delta=1_000_000_000,
+        usdc_raw_delta=-100_000_000,
+        mint=mint(999),
+        block_time=int((AS_OF - timedelta(days=10)).timestamp()),
+    )
+    await repo.store_history_batch(
+        [HistoryItem(summarize(bag, RELAYERS), 0, classify(bag, {W}, RELAYERS))],
+        source="helius",
+        imported_at=NOW,
+    )
+    # 1.000 tokens a 0,05 $ = 50 $ con 10.000 $ de liquidez → 5.000·50/5.050 = 49,50 $
+    await repo.save_token_prices(
+        {mint(999): (Decimal("0.05"), Decimal(10_000))},
+        observed_at=AS_OF - timedelta(minutes=5),
+        source="test",
+    )
+    await repo.save_token_prices(
+        {mint(999): (Decimal(1000), Decimal(10_000))},
+        observed_at=AS_OF + timedelta(minutes=1),
+        source="test",
+    )
+    m = (await analyzer.analyze(W, AS_OF, save=False)).main
+    assert m.abandoned_round_trips == 1 and m.abandoned_priced == 1
+    assert m.abandoned_value_usd == Decimal(5000) * 50 / 5050

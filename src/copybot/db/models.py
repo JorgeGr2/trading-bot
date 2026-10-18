@@ -214,6 +214,21 @@ class CandidateWallet(Base):
     )
 
 
+class TokenPrice(Base):
+    """Precio y liquidez de un token observados en un momento (Jupiter Price API).
+
+    El analizador solo usa precios observados antes de su ``as_of``.
+    """
+
+    __tablename__ = "token_prices"
+
+    mint: Mapped[str] = mapped_column(ADDRESS, primary_key=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    usd_price: Mapped[Decimal | None] = mapped_column(AMOUNT)  # None: sin precio
+    liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(24, 2))
+    source: Mapped[str] = mapped_column(String(20))
+
+
 class HistoryImport(Base):
     """Periodo del historial de una wallet que está importado **completo**.
 

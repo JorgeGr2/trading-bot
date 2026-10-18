@@ -27,6 +27,9 @@ from copybot.solana.constants import (
 
 # Variaciones de SOL por debajo de este valor se consideran ruido (no pago).
 SOL_DUST_LAMPORTS = 10_000
+# Variaciones de un token de como mucho estas unidades mínimas se consideran polvo
+# (p. ej. 0,00000001 de un token intermedio que la ruta deja en la wallet).
+TOKEN_DUST_RAW_UNITS = 100
 
 
 class EventKind(StrEnum):
@@ -287,6 +290,9 @@ def classify(
             amount = Decimal(raw).scaleb(-decimals_of[mint])
             if mint in QUOTE_SYMBOLS:
                 quote_deltas[QUOTE_SYMBOLS[mint]] = amount
+            elif abs(raw) <= TOKEN_DUST_RAW_UNITS:
+                # Restos de tokens intermedios de la ruta o airdrops de spam.
+                reasons.append(f"se ignora polvo de {mint} ({amount:+})")
             else:
                 token_deltas[mint] = amount
 
@@ -305,7 +311,10 @@ def classify(
                     None,
                     Decimal(0),
                     is_signer,
-                    [f"cambian {len(token_deltas)} tokens no estables en la misma transacción"],
+                    [
+                        *reasons,
+                        f"cambian {len(token_deltas)} tokens no estables en la misma transacción",
+                    ],
                 )
             )
             continue
@@ -379,7 +388,7 @@ def classify(
                 None,
                 Decimal(0),
                 is_signer,
-                [f"los pagos no cuadran con una compra o venta simple ({detail})"],
+                [*reasons, f"los pagos no cuadran con una compra o venta simple ({detail})"],
             )
         )
     return events

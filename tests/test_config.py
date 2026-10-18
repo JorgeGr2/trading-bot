@@ -87,3 +87,18 @@ def test_invalid_relayer_rejected():
 
 def test_capital_cap_constant():
     assert MAX_VIRTUAL_CAPITAL_USD == Decimal("100")
+
+
+def test_helius_key_builds_endpoints_and_stays_hidden(monkeypatch):
+    monkeypatch.setenv("COPYBOT_HELIUS_API_KEY", "clave-de-prueba-123")
+    settings = Settings(_env_file=None)
+    http, ws = settings.rpc_endpoints()
+    assert http == "https://mainnet.helius-rpc.com/?api-key=clave-de-prueba-123"
+    assert ws.startswith("wss://mainnet.helius-rpc.com/")
+    assert "clave-de-prueba-123" not in repr(settings)
+
+
+def test_public_rpc_is_the_default():
+    http, ws = Settings(_env_file=None).rpc_endpoints()
+    assert http == "https://api.mainnet-beta.solana.com"
+    assert ws == "wss://api.mainnet-beta.solana.com"

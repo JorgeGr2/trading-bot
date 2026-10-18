@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     # Proveedores de datos
     solana_rpc_url: SecretStr = SecretStr("https://api.mainnet-beta.solana.com")
     solana_ws_url: SecretStr = SecretStr("wss://api.mainnet-beta.solana.com")
+    # Si hay clave de Helius, tiene prioridad sobre las URL anteriores.
+    helius_api_key: SecretStr | None = None
     rpc_max_requests_per_second: float = Field(default=1.0, gt=0, le=50)
     rpc_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
 
@@ -103,3 +105,13 @@ class Settings(BaseSettings):
         from copybot.solana.addresses import validate_address
 
         return validate_address(value)
+
+    def rpc_endpoints(self) -> tuple[str, str]:
+        """URL HTTP y WebSocket del proveedor. Contienen la clave: no registrarlas."""
+        if self.helius_api_key is not None:
+            key = self.helius_api_key.get_secret_value()
+            return (
+                f"https://mainnet.helius-rpc.com/?api-key={key}",
+                f"wss://mainnet.helius-rpc.com/?api-key={key}",
+            )
+        return self.solana_rpc_url.get_secret_value(), self.solana_ws_url.get_secret_value()

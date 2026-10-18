@@ -68,6 +68,15 @@ REAL_CASES = [
     ),
     # Token-2022 con comisión de transferencia del 1 %: cuenta lo que realmente recibe
     # el usuario (30279.536642), no lo que envían los pools (30585.390548).
+    # La ruta deja 0,00000001 de un token intermedio en la wallet: es polvo, no otra compra.
+    (
+        "fomo_buy_with_route_dust",
+        "4E528fvewR7ySEfb6WMnv9jBDZC63ku26Cf2UrQ7wqLM",
+        EventKind.BUY,
+        "BfZCMNKLQkiTyTMuu7gkEQyJD2wKpzkQWhPGsGWgpump",
+        "784959.184917",
+        "-5.171235",
+    ),
     (
         "fomo_buy_token2022_transfer_fee",
         "FhvhGFa4BLCgxreKj1vHpJ8ekGa2pyL9bmVomiwk99CC",
@@ -362,3 +371,8 @@ def test_synthetic_fomo_marker_detected_without_relayer_list():
 def test_malformed_transaction_is_rejected():
     with pytest.raises(MalformedTransactionError):
         classify({"transaction": {}}, None)
+
+
+def test_route_dust_is_reported_not_traded():
+    [ev] = classify(load("fomo_buy_with_route_dust"), None, RELAYERS)
+    assert any("polvo" in r for r in ev.reasons)

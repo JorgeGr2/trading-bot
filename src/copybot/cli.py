@@ -44,7 +44,7 @@ async def _wallets(args: argparse.Namespace, settings: Settings) -> int:
 
 
 async def _monitor(settings: Settings) -> int:
-    rpc_url = settings.solana_rpc_url.get_secret_value()
+    rpc_url, ws_url = settings.rpc_endpoints()
     provider = _provider_name(rpc_url)
     engine = make_engine(settings.database_url.get_secret_value())
     repo = Repository(make_sessionmaker(engine))
@@ -79,7 +79,7 @@ async def _monitor(settings: Settings) -> int:
             )
             await asyncio.sleep(30)
 
-    subscriber = LogsSubscriber(settings.solana_ws_url.get_secret_value(), wallets)
+    subscriber = LogsSubscriber(ws_url, wallets)
     beat = asyncio.create_task(heartbeat())
     try:
         await monitor.run(subscriber.stream())

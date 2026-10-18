@@ -1,8 +1,8 @@
 # Fase 1 — Investigación, viabilidad, arquitectura y presupuesto
 
-- **Estado:** borrador pendiente de tu aprobación. No se ha escrito código de producción.
+- **Estado:** versión 2, actualizada con tus respuestas (apartado 10). Pendiente de tu «adelante» para empezar la Fase 2. No se ha escrito código de producción.
 - **Fecha de la investigación:** 18 de octubre de 2026.
-- **Alcance:** laboratorio de copy-trading **solo en simulación** sobre memecoins de Solana. Sin claves privadas, sin firma de transacciones y sin envío de órdenes.
+- **Alcance:** laboratorio de copy-trading **solo en simulación** sobre memecoins de Solana. Sin claves privadas, sin firma de transacciones y sin envío de órdenes. El **modo con dinero real** queda como Fase 9 opcional: solo se construirá si la simulación cumple los criterios del apartado 12 y tú lo apruebas expresamente.
 
 ---
 
@@ -125,9 +125,9 @@ TypeScript tiene SDKs de Solana más completos para **firmar y enviar** transacc
 | HTTP | `httpx` con timeouts, reintentos con *backoff* y *token bucket* por proveedor | Límites de peticiones y presupuesto de créditos |
 | Configuración | `pydantic-settings` con validación y topes duros en código | Ningún parámetro puede superar los límites de seguridad |
 | Logs | `structlog` en JSON, con filtro de secretos | Logs estructurados sin tokens |
-| Dashboard | FastAPI + Jinja2 + HTMX + uPlot, instalable como PWA en el iPhone | Sin *build* de frontend; superficie de ataque pequeña |
+| Interfaz gráfica | **React + TypeScript** (Vite) con gráficas **TradingView Lightweight Charts**, compilada a ficheros estáticos que sirve FastAPI. Instalable como app (PWA) en la pantalla de inicio del iPhone y usable desde cualquier navegador. | Pediste una interfaz gráfica completa. Una app nativa de iOS exigiría un Mac y la cuota de Apple Developer, y no aporta nada para este uso. |
 | Telegram | `python-telegram-bot` | Mantenido; *polling* sin exponer puertos |
-| Proxy | Caddy (HTTPS automático) y, preferiblemente, **Tailscale** para que el dashboard no sea público | El panel de control no queda expuesto a internet |
+| Acceso privado | **Tailscale** (plan Personal gratuito). El dashboard solo es accesible desde tus dispositivos; no hace falta dominio. | El panel de control no queda expuesto a internet |
 | Tests | pytest, pytest-asyncio, respx (*mocks* HTTP), *fixtures* JSON de transacciones reales | Reproducible |
 
 ### 5.2 Componentes (una sola imagen Docker, varios procesos)
@@ -198,6 +198,8 @@ flowchart LR
 - Un test de CI falla si aparecen en `src/` símbolos prohibidos (`Keypair`, `sendTransaction`, `private_key`, `seed`, etc.).
 - El validador de configuración rechaza cualquier `MODE` distinto de `simulation`.
 - Telegram no tiene comandos de retirada, transferencia ni exportación de claves.
+
+**Preparado para un posible modo real, sin implementarlo:** el motor de decisión entrega cada orden a un **ejecutor** a través de una interfaz única. Ahora solo existe `SimExecutor`. Si algún día se aprueba la Fase 9, se añadiría un `RealExecutor` sin tocar la lógica de decisión, de modo que la simulación mide exactamente lo que haría el bot real.
 
 ### 5.7 Modelo de datos (tablas principales)
 
@@ -280,7 +282,20 @@ Limitaciones de este escenario:
 | Historial para el backtest | Solscan Lite 49 $ **o** Birdeye Starter 99 $ (solo los meses de backtest) | 0–99 $ |
 | **Total** | | **≈ 75–180 $/mes + Jupiter** |
 
-### 7.3 Control de gasto
+### 7.3 Presupuesto acordado: 20–50 $/mes
+
+| Concepto | Opción | Coste/mes | Nota |
+|---|---|---|---|
+| Servidor | IONOS VPS con 4 GB de RAM (centro de datos en la UE) | ~4–10 € | Precios de entrada según reseñas; **la renovación tras la promoción es más cara**. Hay que confirmar precio, renovación y permanencia al contratar. |
+| Helius | Free al principio; **Developer** cuando empiece el descubrimiento vía relayer | 0 $ → 24,50 $ o 49 $ | La página de precios de Helius dice 24,50 $ y su documentación 49 $. Hay que confirmarlo. `getTransactionsForAddress` y las *Enhanced WebSockets* requieren Developer. |
+| Jupiter | Free con clave (1 rps) | 0 $ | Developer cuesta 25 $/mes (10 rps). No cabe en el presupuesto junto con Helius Developer; diseñaremos para 1 rps. |
+| Tailscale, Telegram, monitor externo | Planes gratuitos | 0 $ | |
+| Copias de seguridad | Almacenamiento externo pequeño | 0–2 $ | |
+| **Total** | | **≈ 5–12 $** al principio; **≈ 30–60 $** con Helius Developer | |
+
+Si Helius Developer cuesta realmente 49 $, nos pasaríamos un poco del techo de 50 $. En ese caso: (a) Developer solo durante los meses de descubrimiento, o (b) descubrimiento por muestreo con el plan Free. **Nunca se contrata nada sin tu aprobación.**
+
+### 7.4 Control de gasto
 
 - Un módulo `provider_usage` lleva la cuenta de créditos y peticiones por proveedor.
 - Al llegar al 80 % del presupuesto mensual, envía una alerta. Al llegar al 100 %, el sistema se degrada: se para primero el descubrimiento y el *backfill* histórico, y se mantiene el seguimiento de las posiciones abiertas.
@@ -345,25 +360,99 @@ Una fase **no** está terminada porque el código compile o porque una simulaci�
 | **5** | Backtester: división cronológica, latencia y costes, comparativas, *bootstrap*, informes reproducibles | Mismo informe a partir de la misma semilla y los mismos datos. Avisos de muestra insuficiente. Limitaciones documentadas. |
 | **6** | Dashboard PWA y bot de Telegram | Tests de autenticación (sesión, CSRF, límite de intentos) y de rechazo de usuarios de Telegram no autorizados. `/pausar` funciona con los proveedores caídos. |
 | **7** | Docker Compose en la nube, *healthchecks*, logs con rotación, copias de seguridad **con prueba de restauración**, monitor externo, gestión de secretos, control de gasto | Simulacro de caos: `kill -9` de cada servicio, reinicio de la máquina, corte de red y reinicio de PostgreSQL, todo con recuperación verificada. |
-| **8** | ≥ 14 días de simulación continua e informe final | El informe permite decidir si seguir investigando. **No** cambia nunca a modo real. |
+| **8** | ≥ 14 días de simulación continua (se recomiendan 4 semanas) e informe final | El informe aplica los criterios del apartado 12 y permite decidir si seguir investigando. **No** cambia nunca a modo real. |
+| **9** *(opcional)* | Modo real, solo si se cumplen **todos** los criterios del apartado 12 y lo apruebas expresamente | Ver el apartado 12.2. |
 
 ---
 
-## 10. Preguntas que necesito resolver antes de empezar
+## 10. Respuestas y decisiones (18-oct-2026)
 
-1. **Wallets:** ¿tienes ya direcciones públicas concretas de traders de FOMO? ¿Cuántas, y cómo las obtuviste?
-2. **Presupuesto mensual máximo** para la investigación: ¿~20 $ (escenario mínimo) o ~100–180 $ (escenario robusto)?
-3. **Descubrimiento:** ¿quieres que investigue el descubrimiento de traders vía el relayer de FOMO? Encarece el uso de Helius y, como mínimo, exige el plan Developer.
-4. **Acceso al dashboard:** ¿privado vía Tailscale (recomendado) o público con login + 2FA? ¿Tienes un dominio propio?
-5. **Hosting:** ¿alguna preferencia de proveedor o región (por ejemplo, la UE)? ¿Tienes ya cuenta en alguno?
-6. **Alcance:** confirmar que solo cubrimos **Solana spot** y excluimos los perpetuos y las cadenas EVM que también usa FOMO.
-7. **Riesgo inicial propuesto** (todo configurable a la baja): 10 $ máximo por posición, 5 posiciones como máximo, 20 % de reserva, stop de pérdida diaria del 10 %, pausa automática con un drawdown del 25 %. ¿Te parece bien?
-8. **Lenguaje:** ¿aceptas Python?
-9. **Red del entorno de desarrollo:** ¿habilitas los dominios del apartado 1 para hacer las pruebas en vivo desde aquí, o prefieres que se hagan solo en el servidor?
+| # | Tema | Tu respuesta | Decisión |
+|---|---|---|---|
+| 1 | Wallets de traders | No tienes ninguna | El descubrimiento pasa a ser una pieza central: se hará on-chain a partir del relayer de FOMO, y calcularemos nuestro propio ranking. También podrás añadir wallets a mano desde la interfaz. |
+| 2 | Presupuesto | 20–50 $/mes | Apartado 7.3. El control de gasto tendrá un tope de 50 $/mes. |
+| 3 | Descubrimiento vía relayer | Sí | Fase 2. Primero se verifica on-chain con el RPC público de Solana (gratis). Después, Helius Developer con tu aprobación. |
+| 4 | Dashboard y dominio | No tienes nada | Tailscale (gratis, sin dominio). |
+| 5 | Hosting | IONOS | Aceptado: VPS de 4 GB en la UE. Hay que confirmar el precio de renovación y la permanencia. |
+| 6 | Alcance | Solo conoces FOMO | Solo **compraventa directa de tokens en Solana**. Se excluyen las otras redes que también ofrece FOMO (Base, BNB…) y los perpetuos (apuestas con apalancamiento vía Hyperliquid). Según la prensa del sector, casi todos los ingresos por comisiones de FOMO vienen de swaps en Solana. |
+| 7 | Límites de riesgo | De acuerdo | 10 $ por posición, 5 posiciones como máximo, 20 % de reserva, stop de pérdida diaria del 10 % y pausa automática con un drawdown del 25 %. Desde la interfaz solo se podrán **endurecer**, nunca relajar por encima de estos valores. |
+| 8 | Lenguaje e interfaz | Python sí, pero con interfaz gráfica | Python en el servidor y una interfaz web en React/TypeScript (apartado 5.1). |
+| 9 | Red del entorno de desarrollo | No lo sabes | Ver el apartado 11. |
+| — | Petición nueva | Un modo de simulación que te sirva para decidir si meter dinero real | Apartado 12, más una pantalla «¿Es rentable?» en la interfaz. |
+
+**Pantallas previstas de la interfaz gráfica**
+
+- **Inicio:** semáforo «¿Es rentable?», saldo virtual, PnL neto, drawdown y estado del sistema.
+- **Posiciones y operaciones:** abiertas e historial, con el motivo de cada compra, venta o rechazo.
+- **Traders:** ranking con la puntuación explicada; añadir y quitar wallets.
+- **Simulador «¿y si…?»:** vuelve a ejecutar los datos ya grabados con otros parámetros (tamaño de posición, latencia, stops). Muestra un aviso de sobreajuste, y **sus resultados no cuentan para el semáforo**.
+- **Configuración:** solo dentro de los límites de seguridad.
+- **Control:** pausar, reanudar y detener.
+- **Alertas y rechazos.**
+- **Costes:** gasto en proveedores frente al presupuesto.
 
 ---
 
-## 11. Fuentes consultadas
+## 11. Siguiente paso: acceso a datos reales desde el entorno de desarrollo
+
+El entorno en la nube donde trabaja el asistente de programación bloquea las direcciones de los proveedores de datos. Por eso todavía no se ha podido comprobar ninguna transacción real. Para permitirlas:
+
+1. En la barra de título de la sesión, abre el menú del entorno y pulsa **Edit**.
+2. En **Network access**, añade en **Allowed domains**:
+   - `api.mainnet-beta.solana.com`: basta para la primera verificación. Es gratis y no requiere cuenta.
+   - `mainnet.helius-rpc.com`, `api.helius.xyz`, `api.jup.ag`, `lite-api.jup.ag`, `api.dexscreener.com` y `api.telegram.org`: se usarán más adelante.
+
+   Deja marcada la casilla **Allow package managers**.
+3. Guarda los cambios.
+
+Guía oficial: <https://code.claude.com/docs/en/cloud-environments#network-access>
+
+La alternativa es hacer la verificación directamente en el servidor IONOS. El inconveniente es que tendrías que pagar el servidor antes de saber si la detección de traders de FOMO funciona.
+
+---
+
+## 12. Criterios para decidir si usar dinero real
+
+Estos criterios se fijan **antes** de ver ningún resultado, para no cambiar las reglas a mitad del partido. La interfaz los mostrará como un semáforo:
+
+- **Gris:** muestra insuficiente.
+- **Rojo:** con muestra suficiente, algún criterio falla.
+- **Amarillo:** prometedor, pero aún falta algún criterio.
+- **Verde:** se cumplen todos.
+
+### 12.1 Criterios (todos obligatorios)
+
+| # | Criterio | Umbral |
+|---|---|---|
+| 1 | Duración | ≥ 28 días seguidos de simulación en vivo sin fallos críticos |
+| 2 | Muestra | ≥ 100 operaciones cerradas en el libro de señales y ≥ 30 en la cartera de 100 $ |
+| 3 | Ventaja neta | Rentabilidad media neta por operación > 0 después de todos los costes variables, con el límite inferior del intervalo de confianza del 95 % (*bootstrap*) también > 0 |
+| 4 | Cartera de 100 $ | Beneficio neto positivo al final del periodo. Se muestra también descontando los costes fijos mensuales. |
+| 5 | Riesgo | Drawdown máximo < 25 % y ninguna pausa automática por anomalía que quede sin explicar |
+| 6 | Robustez | Sigue en positivo al quitar las 3 mejores operaciones y al quitar al mejor trader, y es positiva en las dos mitades del periodo |
+| 7 | Calidad de datos y de operación | Precisión de atribución ≥ 95 %, disponibilidad ≥ 99 %, cero órdenes duplicadas y pruebas de recuperación superadas |
+
+Un semáforo en verde **no garantiza beneficios futuros**: las memecoins pueden perder todo su valor en minutos y el mercado cambia.
+
+**Comprobación económica:** con 100 $, ganar un 10 % al mes son 10 $, menos de lo que cuesta la infraestructura (~30–60 $/mes). El modo real solo tendría sentido económico si la rentabilidad neta cubre los costes fijos, o si para operar en real se reduce la infraestructura a planes gratuitos.
+
+### 12.2 Fase 9: modo real (solo con todo en verde y tu aprobación expresa)
+
+- **Wallet nueva** de Solana dedicada solo al bot. No sería tu wallet de FOMO. La recargas tú, con la cantidad que decidas y como máximo 100 $; se recomienda empezar con 20–30 $.
+- El bot hace **sus propios swaps en Solana** a través de Jupiter. FOMO no interviene.
+- El motor de decisión es el mismo; solo cambia el ejecutor. La simulación sigue funcionando en paralelo para comparar los *fills* reales con los simulados.
+- **Protecciones:**
+  - tope de capital fijado en el código;
+  - nunca recarga fondos automáticamente, ni pide préstamos, ni usa apalancamiento;
+  - cada orden se registra antes de enviarse y se comprueba su estado antes de reintentarla, así que no puede haber órdenes duplicadas;
+  - límite de pérdida diaria y botón de parada en Telegram y en la interfaz;
+  - la clave está cifrada y solo existe en el servidor, nunca en el repositorio;
+  - el bot no puede retirar fondos: las retiradas las haces tú a mano desde tu propia wallet.
+- Usa solo dinero que puedas permitirte perder por completo.
+
+---
+
+## 13. Fuentes consultadas
 
 - Helius — precios y planes: <https://helius.dev/pricing>, <https://www.helius.dev/docs/billing/plans>, créditos: <https://docs.helius.xyz/docs/billing/credits.md>, WebSockets: <https://www.helius.dev/docs/faqs/websockets>, cambios de abril de 2026: <https://www.helius.dev/blog/laserstream-websockets>
 - Jupiter — límites: <https://developers.jup.ag/docs/portal/rate-limits>, FAQ: <https://developers.jup.ag/docs/portal/faq>, aplazamiento de `lite-api`: <https://developers.jup.ag/changelog/2025-11>
@@ -376,4 +465,9 @@ Una fase **no** está terminada porque el código compile o porque una simulaci�
 - DexScreener (límites según terceros) — <https://github.com/opensvm/dexscreener-mcp-server>
 - pump.fun / PumpSwap (fuentes secundarias) — <https://madeonsol.com/blog/what-is-pumpswap>, <https://www.theblock.co/post/354038/pumpswap-revenue-tokens>
 - Hosting — <https://findstack.com/resources/hetzner-price-increase-2026>, <https://wz-it.com/en/blog/hetzner-price-increase-june-2026-cpx-ccx-alternatives/>, <https://infratally.com/articles/digitalocean-droplet-pricing-guide-2026/>
+- IONOS (reseñas, no es la web oficial) — <https://www.experte.com/server/ionos>, <https://es.hostadvice.com/hosting-company/ionos-reviews/pricing/>, <https://www.comparevps.com/hosting/ionos>
+- Planes de Jupiter — <https://developers.jup.ag/docs/portal/plans>
+- `getTransactionsForAddress` de Helius — <https://www.helius.dev/blog/introducing-gettransactionsforaddress>, <https://www.helius.dev/docs/es/billing/credits.md>
+- Tailscale — <https://tailscale.com/pricing/>
+- RPC público de Solana (no apto para producción) — <https://solana.com/docs/tools/production-readiness.md>
 - Copy-trading y latencia — <https://prereview.org/reviews/22679925>, <https://rpcfast.com/blog/how-to-build-a-solana-copy-trading-bot>

@@ -5,7 +5,7 @@ copybot discover candidates [--limit N]
 copybot discover screen [--limit N] [--max-windows N]
 copybot discover add <wallet> ... [--file F] [--source leaderboard|manual] [--label T]
 copybot discover import [--top N | --wallet W ... | --activity MIN:MAX --sample N |
-                         --source leaderboard|manual] [--days D]
+                         --source leaderboard|manual | --refresh] [--days D]
 copybot discover run [--windows N] [--days D] [--top N] [--token-lookups N]
 copybot analyze [--wallet W ...] [--as-of FECHA | --prices] [--token-lookups N]
 copybot traders ranking [--limit N]
@@ -74,6 +74,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         help="banda de transacciones al día, p. ej. 0.7:15 (necesita «discover screen»)",
     )
     group.add_argument("--source", choices=["leaderboard", "manual"])
+    group.add_argument(
+        "--refresh",
+        action="store_true",
+        help="actualizar las ya importadas (solo pide lo nuevo; omite las truncadas)",
+    )
     imp.add_argument("--sample", type=int, default=100, help="cuántas, con --activity")
     imp.add_argument("--seed", type=int, default=0, help="semilla de la muestra, con --activity")
     imp.add_argument("--days", type=int, default=None, help="días de historial a importar")
@@ -463,6 +468,10 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                         )
                     elif args.source:
                         wallets = await ctx.repo.candidates_from(args.source)
+                    elif args.refresh:
+                        wallets = [
+                            w.wallet for w in await ctx.repo.imported_wallets() if not w.truncated
+                        ]
                     else:
                         wallets = [
                             c.wallet for c in await ctx.repo.discovery_candidates(limit=args.top)

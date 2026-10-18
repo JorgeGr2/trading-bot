@@ -17,7 +17,7 @@
   - solo 17 de 221 ganan dinero en dólares.
 - **Solo un trader supera los filtros con ventaja positiva** después del coste estimado de copiar: `A9aqAHUX…`, del grupo poco activo. Tiene 34 operaciones, un acierto del 68 % y +20,6 % de media por operación. Pero la muestra es pequeña, una cuarta parte de sus operaciones no se pueden valorar (pagadas en SOL), y entre 221 candidatos uno así puede salir por azar. **Es un candidato a vigilar, no una ventaja demostrada.**
 - **El cálculo es fiable y sus errores están corregidos.** La atribución se ha verificado con 1.025 compraventas reales, sin errores (cota inferior del 99,6 %). Al revisar los resultados encontré y corregí un sesgo serio: las posiciones abandonadas no contaban. Ahora se valoran a lo que valdrían si se vendieran hoy (apartado 5.2).
-- **Coste:** unos 110.000-130.000 créditos de Helius de 1 millón al mes (apartado 7.6), y menos de una hora de ejecución en total.
+- **Coste:** 89.142 créditos de Helius de 1 millón al mes (cifra real de su panel; apartado 7.6), y menos de una hora de ejecución en total.
 
 ## 2. Verificación de la atribución con Helius
 
@@ -67,7 +67,7 @@ Hay tests con cada una de estas transacciones reales (`tests/fixtures/tx/`).
 | Transacciones por petición | **Hasta 1.000** (algunas páginas de la documentación dicen 100) |
 | Paginación | El token de paginación llega también en la última página; la siguiente vendría vacía. El cliente para cuando la página no está llena, para no pagarla |
 | Filtros | Fecha, solo las que tuvieron éxito y `tokenAccounts: "balanceChanged"`, que añade lo recibido en sus cuentas de token sin que la wallet firme |
-| Coste | **Tu panel lo confirma aproximadamente**: 100 créditos por página completa y 10 por consulta de solo firmas (64.172 créditos a las ~18:03 UTC, en línea con mis registros) |
+| Coste | Contrastado con tu panel (89.142 créditos al final, frente a ~92.000 con este modelo): **10 créditos por cada 100 transacciones devueltas** (una página llena cuesta 100), 10 por consulta de solo firmas, 1 por cada `getSignaturesForAddress` y nada por las peticiones rechazadas por exceso de velocidad |
 | Fecha de creación de un token | Su primera transacción, con una consulta de solo firmas (0,4 s) |
 | Jupiter Price API (gratis, sin clave) | Precio y **liquidez** actuales de cada token. Limita las peticiones desde la IP compartida del entorno; el cliente espera y reintenta |
 | Precios históricos (Binance, Pyth, CoinGecko) | **Bloqueados** por la red del entorno |
@@ -289,18 +289,19 @@ Se cortó con `kill -9` la importación de una wallet a los 6 segundos:
 
 ### 7.6 Coste y tiempos
 
-| Paso | Peticiones | Créditos (tarifas del apartado 3) | Tiempo |
+| Paso | Peticiones | Créditos (modelo del apartado 3) | Tiempo |
 |---|---|---|---|
-| Verificación y exploración | ~200 | ~1.700 | — |
-| Primera prueba en vivo (luego repetida desde cero) | 488 | ~35.000 | 15 min |
-| Muestreo (12 ventanas) | 12 | 1.200 | 20 s |
-| Historiales (221 wallets, más actualizaciones) | 561 páginas | 56.100 | 13 min |
+| Verificación y exploración | ~200 | ~600 | — |
+| Primera prueba en vivo (luego repetida desde cero) | ~490 | ~34.000 | 15 min |
+| Muestreo (12 ventanas de 1.000) | 12 | 1.200 | 20 s |
+| Historiales (221 wallets, 368.000 transacciones, más actualizaciones) | 561 páginas | ~39.600 | 13 min |
 | Fechas de creación de tokens | 1.438 | 14.380 | ~6 min |
-| Filtro de actividad (2.000 wallets) | 2.000 | **2.000-20.000** (sin confirmar) | 6,5 min |
+| Filtro de actividad (2.000 wallets) | 2.000 | 2.000 | 6,5 min |
 | Precios de Jupiter | ~95 | 0 | ~5 min |
-| **Total** | | **≈ 110.000-130.000** | |
+| **Total estimado** | | **~92.000** | |
+| **Total real (panel de Helius)** | | **89.142** | |
 
-El rango depende de lo que cueste `getSignaturesForAddress`, que no figura en la documentación accesible (1 o 10 créditos). **Si tu panel marca ahora unos 111.000 créditos, cuesta 1; si marca unos 129.000, cuesta 10.** Hasta confirmarlo, el programa cuenta 10 por prudencia.
+El modelo se desvía un 3 % de la cifra real, así que el contador del programa ya usa estas tarifas. Con ellas, analizar 150 wallets poco activas cuesta unos 4.000 créditos: lo más caro son las wallets muy activas y las fechas de creación de los tokens.
 
 La base de datos de la prueba ocupa 321 MB, con 230.307 eventos de 221 wallets.
 
@@ -320,7 +321,7 @@ La base de datos de la prueba ocupa 321 MB, con 230.307 eventos de 221 wallets.
 
 ## 9. Limitaciones y problemas abiertos
 
-1. **Coste de `getSignaturesForAddress` sin confirmar** (apartado 7.6). Con tu próxima captura del panel quedará resuelto.
+1. **Tarifa de Helius deducida, no publicada.** Cuadra con el panel con un error del 3 % (apartado 7.6); conviene volver a contrastarla de vez en cuando.
 2. **Muchas comparaciones.** Con 221 candidatos, alguno saldrá bien por azar. Un trader solo debería darse por bueno si **sigue siendo positivo en las semanas siguientes**, fuera de la muestra en la que se eligió. Eso es justo lo que medirá la Fase 4.
 3. **Sesgo de supervivencia y de mirar hacia atrás.** Elegimos traders activos hoy y miramos sus últimos 30-90 días. Para el backtest de la Fase 5, la selección tendrá que hacerse «a fecha de entonces».
 4. **Sin precio histórico de SOL.** Las compraventas pagadas en SOL no se valoran en dólares (se cuentan y se avisa). En FOMO son raras, pero hay traders, como el candidato, que también operan fuera de FOMO.
@@ -343,8 +344,7 @@ La base de datos de la prueba ocupa 321 MB, con 230.307 eventos de 221 wallets.
    - Si la app las muestra en el perfil de cada trader, cópialas (por ejemplo, las 20 primeras de la clasificación a 30 días) en un fichero de texto, una por línea: `dirección, @usuario puesto 3`. Yo las analizo con `copybot discover add --file … --source leaderboard`.
    - Si no las muestra, existen webs extraoficiales que dicen «revelarlas» a partir del nombre de usuario. En la Fase 1 decidimos no depender de ellas. Usarlas sería decisión tuya, revisando antes sus condiciones; yo no las integraría en el programa.
    - En ambos casos, el PnL de la leaderboard solo sirve de pista: lo mediremos con nuestro propio cálculo.
-2. **Otra captura del panel de Helius**, para confirmar el coste del filtro de actividad (apartado 7.6).
-3. **Una decisión sobre la Fase 4.** Mi recomendación:
+2. **Una decisión sobre la Fase 4.** Mi recomendación:
    - **construir el simulador** (es imprescindible para medir el coste real de copiar, que ahora es un supuesto del 3 %);
    - **ponerlo a prueba con una lista pequeña en observación**: `A9aqAHUX…`, los traders de la leaderboard que pasen los filtros y los mejores de nuevas búsquedas;
    - **repetir el descubrimiento de traders poco activos periódicamente** (barato: unos 30.000 créditos por cada 150 wallets), para tener cada vez más candidatos y comprobar si los buenos **siguen siendo buenos** en las semanas siguientes.

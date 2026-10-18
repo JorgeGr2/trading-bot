@@ -26,13 +26,24 @@ log = structlog.get_logger(__name__)
 # Errores JSON-RPC que indican que conviene reintentar (nodo atrasado o saturado).
 _RETRYABLE_RPC_CODES = {-32005, -32007, -32014, -32016, 429}
 
-# Créditos que cobra Helius por petición. getTransactionsForAddress: 100 con
-# transacciones completas y 10 si solo se piden firmas, según su documentación; el panel
-# de Helius cuadra con estas cifras (Fase 3). Para getSignaturesForAddress no hay cifra
-# publicada a la vista: se cuenta 10 por prudencia (mejor sobrestimar el gasto que
-# quedarse sin créditos). Los métodos no listados cuestan 1.
-HELIUS_CREDITS_PER_REQUEST = {"getTransactionsForAddress": 100, "getSignaturesForAddress": 10}
+# Tarifa de Helius, contrastada con su panel en la Fase 3 (89.142 créditos reales frente
+# a ~92.000 estimados con este modelo):
+# * getTransactionsForAddress con transacciones completas: 10 créditos por cada 100
+#   transacciones devueltas (una página llena de 1.000 cuesta 100);
+# * getTransactionsForAddress solo con firmas: 10 por petición;
+# * el resto de métodos, 1 por petición;
+# * las peticiones rechazadas (429, 5xx o error de red) no se cobran.
+# Para el control de presupuesto se reserva antes el máximo posible de la petición.
+HELIUS_CREDITS_PER_REQUEST = {"getTransactionsForAddress": 100}
 GTFA_SIGNATURES_CREDITS = 10
+GTFA_CREDITS_PER_100_TRANSACTIONS = 10
+
+
+def gtfa_full_credits(result: Any) -> int:
+    """Créditos de una página completa de getTransactionsForAddress según lo devuelto."""
+    returned = len((result or {}).get("data") or [])
+    return max(1, -(-returned // 100)) * GTFA_CREDITS_PER_100_TRANSACTIONS
+
 
 # Máximo de transacciones por página de ``getTransactionsForAddress`` (medido: con
 # 1001 el nodo responde «You can only request up to 1000 transactions at a time»).
@@ -131,8 +142,17 @@ class SolanaRpc:
         delay = min(self._backoff_max, self._backoff_base * 2**attempt)
         return delay * (0.5 + random.random() / 2)  # noqa: S311 (jitter, no criptografía)
 
-    async def call(self, method: str, params: list[Any], *, credits: int | None = None) -> Any:
-        """``credits`` sustituye a la tarifa del método cuando depende de los parámetros."""
+    async def call(
+        self,
+        method: str,
+        params: list[Any],
+        *,
+        credits: int | None = None,
+        credits_for_result: Callable[[Any], int] | None = None,
+    ) -> Any:
+        """``credits`` sustituye a la tarifa del método (es lo que se reserva en el control
+        de presupuesto); ``credits_for_result`` calcula el coste real a partir de la
+        respuesta, cuando depende de lo devuelto."""
         last_error: Exception | None = None
         cost = self._credits.get(method, 1)
         if credits is not None and method in self._credits:
@@ -141,21 +161,19 @@ class SolanaRpc:
             if self._budget_check is not None:
                 await self._budget_check(method, cost)
             await self._limiter.acquire()
-            # Cada intento cuenta para el gasto, aunque falle.
             self.usage[method] += 1
-            self.credits[method] += cost
-            if self._on_usage is not None:
-                await self._on_usage(method, 1, cost)
             body = {"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params}
             try:
                 response = await self._client.post(self._url, json=body)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
+                await self._account(method, 0)
                 last_error = exc
                 delay = self._backoff(attempt)
                 log.warning("rpc_transport_error", method=method, error=type(exc).__name__)
                 await self._sleep(delay)
                 continue
             if response.status_code == 429 or response.status_code >= 500:
+                await self._account(method, 0)  # rechazada: no se cobra
                 retry_after = response.headers.get("Retry-After")
                 delay = float(retry_after) if retry_after else self._backoff(attempt)
                 delay = min(delay, self._backoff_max)
@@ -164,9 +182,14 @@ class SolanaRpc:
                 await self._sleep(delay)
                 continue
             if response.status_code != 200:
+                await self._account(method, 0)
                 raise RpcError(method, f"HTTP {response.status_code}", response.status_code)
             data = response.json()
             error = data.get("error")
+            charged = cost
+            if credits_for_result is not None and not error:
+                charged = credits_for_result(data.get("result"))
+            await self._account(method, charged)
             if error:
                 code = error.get("code")
                 if code in _RETRYABLE_RPC_CODES:
@@ -176,6 +199,11 @@ class SolanaRpc:
                 raise RpcError(method, str(error.get("message")), code)
             return data.get("result")
         raise RpcError(method, f"sin éxito tras {self._max_attempts} intentos: {last_error}")
+
+    async def _account(self, method: str, credits: int) -> None:
+        self.credits[method] += credits
+        if self._on_usage is not None:
+            await self._on_usage(method, 1, credits)
 
     # --- Métodos usados por el sistema ----------------------------------------
 
@@ -262,7 +290,10 @@ class SolanaRpc:
             await self.call(
                 "getTransactionsForAddress",
                 [address, opts],
-                credits=None if full else GTFA_SIGNATURES_CREDITS,
+                credits=GTFA_CREDITS_PER_100_TRANSACTIONS * -(-limit // 100)
+                if full
+                else GTFA_SIGNATURES_CREDITS,
+                credits_for_result=gtfa_full_credits if full else None,
             )
             or {}
         )

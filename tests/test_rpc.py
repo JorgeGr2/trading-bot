@@ -114,11 +114,33 @@ async def test_usage_callback():
         await rpc.get_transactions_for_address("addr", full=False)
         await rpc.get_transactions_for_address("addr", full=True)
     assert seen == [
-        ("getSignaturesForAddress", 1, 10),
+        ("getSignaturesForAddress", 1, 1),
         ("getTransactionsForAddress", 1, 10),  # solo firmas
-        ("getTransactionsForAddress", 1, 100),  # transacciones completas
+        ("getTransactionsForAddress", 1, 10),  # completas, página vacía: el mínimo
     ]
-    assert rpc.credits["getTransactionsForAddress"] == 110
+    assert rpc.credits["getTransactionsForAddress"] == 20
+
+
+@respx.mock
+async def test_full_pages_are_charged_by_transactions_returned_and_rejections_are_free():
+    page = {"data": [{"transaction": {}} for _ in range(250)], "paginationToken": None}
+    respx.post(URL).mock(side_effect=[httpx.Response(429), ok(page)])
+    reserved: list[int] = []
+
+    async def budget_check(method: str, credits: int) -> None:
+        reserved.append(credits)
+
+    async with SolanaRpc(
+        URL,
+        rate_per_second=1000,
+        budget_check=budget_check,
+        credits_per_request=HELIUS_CREDITS_PER_REQUEST,
+        sleep=Sleeper(),
+    ) as rpc:
+        await rpc.get_transactions_for_address("addr", full=True, limit=1000)
+    assert reserved == [100, 100]  # se reserva el máximo de una página llena
+    assert rpc.usage["getTransactionsForAddress"] == 2
+    assert rpc.credits["getTransactionsForAddress"] == 30  # 250 transacciones; el 429, gratis
 
 
 @respx.mock

@@ -185,6 +185,35 @@ class DiscoveryObservation(Base):
     )
 
 
+class CandidateWallet(Base):
+    """Wallet candidata a analizar, de dónde viene y cuánto opera.
+
+    ``relayer``: vista al muestrear el relayer de FOMO. ``leaderboard``: añadida a mano
+    desde la leaderboard de FOMO (su PnL allí no se usa: solo sirve de pista).
+    ``manual``: añadida a mano por otro motivo.
+    """
+
+    __tablename__ = "candidate_wallets"
+
+    wallet: Mapped[str] = mapped_column(ADDRESS, primary_key=True)
+    source: Mapped[str] = mapped_column(String(20))
+    label: Mapped[str | None] = mapped_column(String(100))
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Filtro de actividad: transacciones con éxito en los últimos ``activity_days`` días.
+    screened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activity_days: Mapped[int | None] = mapped_column(Integer)
+    recent_transactions: Mapped[int | None] = mapped_column(Integer)
+    # Se alcanzó el máximo de la consulta: hay al menos ``recent_transactions``.
+    activity_capped: Mapped[bool | None] = mapped_column(Boolean)
+
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('relayer', 'leaderboard', 'manual')", name="candidate_source_valid"
+        ),
+        Index("ix_candidate_wallets_source", "source"),
+    )
+
+
 class HistoryImport(Base):
     """Periodo del historial de una wallet que está importado **completo**.
 

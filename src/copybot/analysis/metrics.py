@@ -7,6 +7,11 @@ y las operaciones cerradas dentro de ella. Nada posterior a ``as_of`` interviene
 Para copiar con un tamaño fijo por operación, lo que importa es la **rentabilidad
 media por operación** (cada operación pesa lo mismo), no el PnL en dólares del trader,
 que dominan sus apuestas más grandes. Por eso se calculan las dos.
+
+La serie **prudente** de rentabilidades incluye también las posiciones abandonadas
+(abiertas y sin movimiento desde hace más de ``stale_open_hours``), valorando a 0 lo
+que queda. Sin ellas, quien vende sus aciertos y se queda con las pérdidas parecería
+rentable: solo se verían las operaciones que cerró.
 """
 
 from __future__ import annotations
@@ -23,7 +28,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from copybot.analysis.positions import ZERO, Ledger, RoundTrip, Trade, build_ledger
 
 # Cambiarla cuando cambie el cálculo: forma parte del params_hash de los snapshots.
-ANALYZER_VERSION = "1"
+# 2: serie prudente con las posiciones abandonadas; abandono según la última actividad.
+ANALYZER_VERSION = "2"
 
 
 class AnalysisParams(BaseSettings):
@@ -35,7 +41,7 @@ class AnalysisParams(BaseSettings):
     # cantidad máxima que llegó a tener.
     close_tolerance: Decimal = Field(default=Decimal("0.01"), ge=0, lt=Decimal("0.2"))
     # Una posición abierta sin movimientos durante más de estas horas se considera
-    # abandonada y, en el PnL prudente, se valora a 0.
+    # abandonada y, en el PnL y la rentabilidad prudentes, lo que queda se valora a 0.
     stale_open_hours: int = Field(default=72, gt=0, le=24 * 30)
     # Salidas «rápidas»: la primera venta llega antes de estos segundos.
     quick_exit_seconds: int = Field(default=60, gt=0, le=3600)
@@ -86,7 +92,13 @@ class WindowMetrics:
     median_return: Decimal | None
     clipped_mean_return: Decimal | None
     clipped_stdev_return: Decimal | None
-    first_half_mean_return: Decimal | None
+    # Serie prudente: cerradas + abandonadas (lo que queda, a 0), con el mismo tope.
+    abandoned_round_trips: int
+    prudent_round_trips: int
+    prudent_mean_return: Decimal | None
+    prudent_stdev_return: Decimal | None
+    prudent_mean_without_top3: Decimal | None
+    first_half_mean_return: Decimal | None  # serie prudente
     second_half_mean_return: Decimal | None
     round_trip_pnl_usd: Decimal
     pnl_without_best_usd: Decimal
@@ -195,30 +207,31 @@ def compute_window_metrics(
     trip_pnls = sorted((t.pnl for t in closed), reverse=True)
     gains = sum((p for p in trip_pnls if p > 0), ZERO)
     losses = -sum((p for p in trip_pnls if p < 0), ZERO)
-    first_half = [
-        min(t.roi, params.return_clip)
-        for t in closed
-        if t.roi is not None and t.closed_at and t.closed_at <= mid
-    ]
-    second_half = [
-        min(t.roi, params.return_clip)
-        for t in closed
-        if t.roi is not None and t.closed_at and t.closed_at > mid
-    ]
     holds = [h for t in closed if (h := t.hold_seconds) is not None]
     first_sells = [s for t in closed if (s := t.seconds_to_first_sell) is not None]
 
-    # --- Posiciones abiertas en as_of -------------------------------------------
+    # --- Posiciones abiertas en as_of y serie prudente --------------------------
     open_trips = ledger.open_trips()
     stale_limit = as_of - timedelta(hours=params.stale_open_hours)
-    stale_cost = sum(
-        (
-            t.remaining_cost
-            for t in open_trips
-            if in_window(t.opened_at) and t.opened_at < stale_limit
-        ),
-        ZERO,
-    )
+    abandoned = [
+        t
+        for t in open_trips
+        if in_window(t.opened_at) and (t.last_activity_at or t.opened_at) < stale_limit
+    ]
+    stale_cost = sum((t.remaining_cost for t in abandoned), ZERO)
+    prudent: list[tuple[datetime, Decimal]] = [
+        (t.closed_at, min(t.roi, params.return_clip))
+        for t in closed
+        if t.closed_at is not None and t.roi is not None
+    ]
+    prudent += [
+        (t.last_activity_at or t.opened_at, min(roi, params.return_clip))
+        for t in abandoned
+        if (roi := t.abandoned_roi) is not None
+    ]
+    prudent_values = [r for _, r in prudent]
+    first_half = [r for moment, r in prudent if moment <= mid]
+    second_half = [r for moment, r in prudent if moment > mid]
 
     # --- Sniping: edad del token en la compra que abre cada operación -----------
     created = token_created_at or {}
@@ -269,6 +282,11 @@ def compute_window_metrics(
         median_return=_median(returns),
         clipped_mean_return=_mean(clipped),
         clipped_stdev_return=_stdev(clipped),
+        abandoned_round_trips=len(abandoned),
+        prudent_round_trips=len(prudent_values),
+        prudent_mean_return=_mean(prudent_values),
+        prudent_stdev_return=_stdev(prudent_values),
+        prudent_mean_without_top3=_mean(sorted(prudent_values, reverse=True)[3:]),
         first_half_mean_return=_mean(first_half),
         second_half_mean_return=_mean(second_half),
         round_trip_pnl_usd=sum(trip_pnls, ZERO),

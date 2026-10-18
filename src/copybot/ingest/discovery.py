@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any, Protocol
 
 import structlog
 
@@ -110,6 +111,65 @@ class RelayerSampler:
             observations=observations,
         )
         return WindowResult(start, len(page.items), len(observations), new, credits)
+
+
+class SignaturesRpc(Protocol):
+    async def get_signatures_for_address(
+        self,
+        address: str,
+        *,
+        before: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+        commitment: str = "confirmed",
+    ) -> list[dict[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class Activity:
+    wallet: str
+    transactions: int  # con éxito, en los últimos ``days`` días
+    capped: bool  # la consulta llegó a su máximo: hay al menos ``transactions``
+    days: int
+
+    @property
+    def per_day(self) -> Decimal:
+        return Decimal(self.transactions) / self.days
+
+
+class ActivityScreener:
+    """Cuánto opera una wallet, con una sola consulta barata (``getSignaturesForAddress``).
+
+    Sirve para encontrar traders que operan **poco**, que el muestreo del relayer apenas
+    ve, sin pagar la importación completa de su historial.
+    """
+
+    def __init__(
+        self,
+        rpc: SignaturesRpc,
+        repo: Repository,
+        *,
+        days: int = 37,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._rpc = rpc
+        self._repo = repo
+        self._days = days
+        self._clock = clock
+
+    async def screen(self, wallet: str) -> Activity:
+        now = self._clock()
+        cutoff = (now - timedelta(days=self._days)).timestamp()
+        limit = 1000
+        entries = await self._rpc.get_signatures_for_address(wallet, limit=limit)
+        recent = [e for e in entries if (e.get("blockTime") or 0) >= cutoff]
+        # Si la página está llena y su transacción más antigua aún es reciente, hay más.
+        capped = len(entries) == limit and len(recent) == len(entries)
+        succeeded = sum(1 for e in recent if e.get("err") is None)
+        await self._repo.save_screening(
+            wallet, days=self._days, transactions=succeeded, capped=capped, screened_at=now
+        )
+        return Activity(wallet, succeeded, capped, self._days)
 
 
 class TokenCreationLookup:

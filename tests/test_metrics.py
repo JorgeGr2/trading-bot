@@ -44,7 +44,13 @@ def test_window_metrics_by_hand():
     assert m.mean_return == Decimal("0.445")
     assert m.median_return == Decimal("0.445")
     assert m.clipped_stdev_return == pytest.approx(Decimal("0.7707463914933368"))
-    assert m.first_half_mean_return == Decimal("0.445")  # las dos cierran antes del día 6,5
+    # Serie prudente: A (−10 %), B (+99 %) y G, abandonada (comprada el día 3,5 por 4 $ y
+    # sin tocar desde entonces: −100 %). E es reciente (< 72 h) y F, anterior a la ventana.
+    assert (m.abandoned_round_trips, m.prudent_round_trips) == (1, 3)
+    assert m.prudent_mean_return == Decimal("-0.11") / 3
+    assert m.prudent_stdev_return == pytest.approx(Decimal("0.9965106"), abs=Decimal("1e-7"))
+    assert m.prudent_mean_without_top3 is None  # no quedan operaciones
+    assert m.first_half_mean_return == Decimal("-0.11") / 3  # las tres, antes del día 6,5
     assert m.second_half_mean_return is None
     assert (m.round_trip_pnl_usd, m.pnl_without_best_usd) == (Decimal("48.5"), Decimal(-1))
     assert m.top1_profit_share == 1
@@ -116,3 +122,18 @@ def test_no_information_after_as_of_is_used(seed):
     assert metrics(trades).to_json() == reference
     assert metrics(trades + future).to_json() == reference
     assert metrics(list(reversed(trades))).to_json() == reference  # el orden de entrada da igual
+
+
+def test_recent_activity_means_not_abandoned():
+    """Una posición abierta hace tiempo pero con compras recientes no está abandonada."""
+    trades = [
+        trade("a", 1, at(3, 1), "buy", "X", "100", "10"),
+        trade("b", 2, at(9), "buy", "X", "100", "10"),  # sigue comprando: está activa
+        trade("c", 3, at(3, 1), "buy", "Y", "100", "10"),
+        trade("d", 4, at(4), "sell", "Y", "50", "20"),  # vendió la mitad y lo dejó
+    ]
+    m = metrics(trades, token_created_at={})
+    assert m.abandoned_round_trips == 1  # solo Y
+    # Y: coste 10, vendió la mitad por 20 y el resto (coste 5) vale 0 → (20 − 10) / 10
+    assert m.prudent_mean_return == Decimal(1)
+    assert m.stale_open_cost_usd == 5

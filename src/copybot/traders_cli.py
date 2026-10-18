@@ -2,7 +2,10 @@
 
 copybot discover sample [--windows N] [--days D] [--seed S]
 copybot discover candidates [--limit N]
-copybot discover import [--top N] [--wallet W ...]
+copybot discover screen [--limit N] [--max-windows N]
+copybot discover add <wallet> ... [--file F] [--source leaderboard|manual] [--label T]
+copybot discover import [--top N | --wallet W ... | --activity MIN:MAX --sample N |
+                         --source leaderboard|manual] [--days D]
 copybot discover run [--windows N] [--days D] [--top N] [--token-lookups N]
 copybot analyze [--wallet W ...] [--as-of FECHA] [--token-lookups N]
 copybot traders ranking [--limit N]
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -28,10 +32,10 @@ from copybot.budget import BudgetExceededError, CreditBudget
 from copybot.config import Settings
 from copybot.db.repo import Repository
 from copybot.db.session import make_engine, make_sessionmaker
-from copybot.ingest.discovery import RelayerSampler, TokenCreationLookup
+from copybot.ingest.discovery import ActivityScreener, RelayerSampler, TokenCreationLookup
 from copybot.ingest.history import HistoryImporter
 from copybot.solana.addresses import validate_address
-from copybot.solana.rpc import HELIUS_CREDITS_PER_REQUEST, SolanaRpc
+from copybot.solana.rpc import HELIUS_CREDITS_PER_REQUEST, RpcError, SolanaRpc
 
 log = structlog.get_logger(__name__)
 
@@ -43,9 +47,35 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _sample_args(sample)
     cand = dsub.add_parser("candidates", help="listar las wallets candidatas")
     cand.add_argument("--limit", type=int, default=20)
+    screen = dsub.add_parser(
+        "screen", help="medir cuánto opera cada wallet vista (consulta barata, sin importar)"
+    )
+    screen.add_argument("--limit", type=int, default=1000)
+    screen.add_argument(
+        "--max-windows",
+        type=int,
+        default=None,
+        help="solo wallets vistas en como mucho N ventanas (1 = las menos activas)",
+    )
+    screen.add_argument("--days", type=int, default=37)
+    add = dsub.add_parser("add", help="añadir wallets candidatas a mano (p. ej. de la leaderboard)")
+    add.add_argument("wallets", nargs="*")
+    add.add_argument("--file", help="fichero con una wallet por línea: dirección[,etiqueta]")
+    add.add_argument("--source", choices=["leaderboard", "manual"], default="leaderboard")
+    add.add_argument("--label", help="p. ej. «@usuario, puesto 3 a 30 días»")
     imp = dsub.add_parser("import", help="importar el historial de las candidatas")
-    imp.add_argument("--top", type=int, default=20)
-    imp.add_argument("--wallet", action="append", default=[])
+    group = imp.add_mutually_exclusive_group()
+    group.add_argument("--top", type=int, default=20, help="las N más recurrentes del muestreo")
+    group.add_argument("--wallet", action="append", default=[])
+    group.add_argument(
+        "--activity",
+        type=parse_band,
+        help="banda de transacciones al día, p. ej. 0.7:15 (necesita «discover screen»)",
+    )
+    group.add_argument("--source", choices=["leaderboard", "manual"])
+    imp.add_argument("--sample", type=int, default=100, help="cuántas, con --activity")
+    imp.add_argument("--seed", type=int, default=0, help="semilla de la muestra, con --activity")
+    imp.add_argument("--days", type=int, default=None, help="días de historial a importar")
     run = dsub.add_parser("run", help="muestrear, importar y analizar de una vez")
     _sample_args(run)
     run.add_argument("--top", type=int, default=20)
@@ -67,6 +97,29 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     rank.add_argument("--limit", type=int, default=20)
     show = tsub.add_parser("show")
     show.add_argument("wallet")
+
+
+def parse_band(text: str) -> tuple[Decimal, Decimal]:
+    try:
+        low, high = (Decimal(part) for part in text.split(":"))
+    except (ValueError, ArithmeticError) as exc:
+        raise argparse.ArgumentTypeError("formato MIN:MAX, p. ej. 0.7:15") from exc
+    if not 0 <= low <= high:
+        raise argparse.ArgumentTypeError("debe cumplirse 0 ≤ MIN ≤ MAX")
+    return low, high
+
+
+def read_wallet_file(path: str) -> list[tuple[str, str | None]]:
+    """Una wallet por línea: ``dirección`` o ``dirección,etiqueta``. Ignora vacías y #."""
+    rows = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            address, _, label = line.partition(",")
+            rows.append((validate_address(address), label.strip() or None))
+    return rows
 
 
 def _sample_args(parser: argparse.ArgumentParser) -> None:
@@ -167,7 +220,41 @@ async def show_candidates(ctx: Context, limit: int) -> None:
         print(f"{c.wallet:44}  {c.windows:8}  {c.trades:12}  {c.volume_usd:12.2f} $")
 
 
-async def import_histories(ctx: Context, wallets: list[str]) -> list[str]:
+async def screen(ctx: Context, limit: int, max_windows: int | None, days: int) -> None:
+    screener = ActivityScreener(_rpc(ctx), ctx.repo, days=days)
+    wallets = await ctx.repo.wallets_to_screen(limit=limit, max_windows=max_windows)
+    print(f"Midiendo la actividad de {len(wallets)} wallets (últimos {days} días)…")
+    bands = Counter()
+    for i, wallet in enumerate(wallets, start=1):
+        try:
+            activity = await screener.screen(wallet)
+        except RpcError as exc:
+            log.warning("screen_failed", wallet=wallet, error=str(exc))
+            bands["error"] += 1
+            continue
+        per_day = activity.per_day
+        if activity.capped:
+            bands["≥ 27 al día (máximo de la consulta)"] += 1
+        elif per_day < Decimal("0.7"):
+            bands["< 0,7 al día"] += 1
+        elif per_day <= 15:
+            bands["0,7 - 15 al día"] += 1
+        else:
+            bands["> 15 al día"] += 1
+        if i % 200 == 0:
+            print(f"  {i}/{len(wallets)}")
+    for band, count in bands.most_common():
+        print(f"  {band}: {count}")
+
+
+async def add_candidates(ctx: Context, rows: list[tuple[str, str | None]], source: str) -> None:
+    new = 0
+    for wallet, label in rows:
+        new += await ctx.repo.add_candidate(wallet, source=source, label=label)
+    print(f"{len(rows)} wallets ({new} nuevas) registradas como «{source}».")
+
+
+async def import_histories(ctx: Context, wallets: list[str], days: int | None = None) -> list[str]:
     importer = HistoryImporter(
         _rpc(ctx),
         ctx.repo,
@@ -178,7 +265,7 @@ async def import_histories(ctx: Context, wallets: list[str]) -> list[str]:
     done: list[str] = []
     for i, wallet in enumerate(wallets, start=1):
         try:
-            r = await importer.import_wallet(wallet, days=ctx.settings.history_days)
+            r = await importer.import_wallet(wallet, days=days or ctx.settings.history_days)
         except BudgetExceededError as exc:
             print(f"Se detiene la importación: {exc}")
             break
@@ -244,8 +331,11 @@ async def ranking(ctx: Context, limit: int) -> None:
         )
 
     rows.sort(key=order)
+    origin = {
+        w: c.source for w, c in (await ctx.repo.candidate_info(r[0].wallet for r in rows)).items()
+    }
     print(
-        f"{'#':>3}  {'wallet':44}  {'puntos':>6}  {'oper.':>5}  {'media/op':>9}  "
+        f"{'#':>3}  {'wallet':44}  {'origen':11}  {'puntos':>6}  {'oper.':>5}  {'media/op':>9}  "
         f"{'1ª venta':>9}  motivo de exclusión"
     )
     for i, (s, m) in enumerate(rows[:limit], start=1):
@@ -253,8 +343,9 @@ async def ranking(ctx: Context, limit: int) -> None:
         first_txt = "—" if first is None else f"{Decimal(first):.0f} s"
         reason = s.explanation[1].strip(" -") if not s.eligible and len(s.explanation) > 1 else ""
         points = f"{s.score:6.2f}" if s.score is not None else "excl."
+        source = origin.get(s.wallet, "relayer")
         print(
-            f"{i:3}  {s.wallet:44}  {points:>6}  {m.get('round_trips', 0):5}  "
+            f"{i:3}  {s.wallet:44}  {source:11}  {points:>6}  {m.get('round_trips', 0):5}  "
             f"{_fmt_pct(m.get('clipped_mean_return')):>9}  {first_txt:>9}  {reason}"
         )
 
@@ -268,6 +359,10 @@ async def show(ctx: Context, wallet: str) -> None:
         return
     s = scores[0]
     print(f"Wallet {wallet} a fecha {s.as_of:%Y-%m-%d %H:%M} UTC (puntuación v{s.scoring_version})")
+    info = (await ctx.repo.candidate_info([wallet])).get(wallet)
+    if info is not None:
+        label = f" ({info.label})" if info.label else ""
+        print(f"  Origen: {info.source}{label}")
     for line in s.explanation:
         print(f"  {line}")
     snap = await ctx.repo.metric_snapshot(
@@ -311,7 +406,7 @@ def parse_as_of(text: str | None, now: datetime | None = None) -> datetime:
 
 
 async def run(args: argparse.Namespace, settings: Settings) -> int:
-    needs_helius = args.command == "discover" and args.action != "candidates"
+    needs_helius = args.command == "discover" and args.action not in ("candidates", "add")
     needs_helius = needs_helius or (args.command == "analyze" and args.token_lookups > 0)
     async with context(settings, needs_helius=needs_helius) as ctx:
         spent_before = sum(ctx.rpc.credits.values()) if ctx.rpc else 0
@@ -321,11 +416,32 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                     await sample(ctx, args.windows, args.days, args.seed)
                 elif args.action == "candidates":
                     await show_candidates(ctx, args.limit)
+                elif args.action == "screen":
+                    await screen(ctx, args.limit, args.max_windows, args.days)
+                elif args.action == "add":
+                    rows = [(validate_address(w), args.label) for w in args.wallets]
+                    if args.file:
+                        rows += read_wallet_file(args.file)
+                    await add_candidates(ctx, rows, args.source)
                 elif args.action == "import":
-                    wallets = [validate_address(w) for w in args.wallet] or [
-                        c.wallet for c in await ctx.repo.discovery_candidates(limit=args.top)
-                    ]
-                    await import_histories(ctx, wallets)
+                    if args.wallet:
+                        wallets = [validate_address(w) for w in args.wallet]
+                    elif args.activity:
+                        low, high = args.activity
+                        wallets = await ctx.repo.candidates_by_activity(
+                            min_per_day=low, max_per_day=high, limit=args.sample, seed=args.seed
+                        )
+                        print(
+                            f"{len(wallets)} wallets elegidas al azar entre las que hacen "
+                            f"{low}-{high} transacciones al día."
+                        )
+                    elif args.source:
+                        wallets = await ctx.repo.candidates_from(args.source)
+                    else:
+                        wallets = [
+                            c.wallet for c in await ctx.repo.discovery_candidates(limit=args.top)
+                        ]
+                    await import_histories(ctx, wallets, args.days)
                 else:
                     await sample(ctx, args.windows, args.days, args.seed)
                     candidates = await ctx.repo.discovery_candidates(limit=args.top)

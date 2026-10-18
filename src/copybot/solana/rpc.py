@@ -26,9 +26,13 @@ log = structlog.get_logger(__name__)
 # Errores JSON-RPC que indican que conviene reintentar (nodo atrasado o saturado).
 _RETRYABLE_RPC_CODES = {-32005, -32007, -32014, -32016, 429}
 
-# Créditos que cobra Helius por petición según su documentación (no verificado con la
-# factura: el panel de Helius es la referencia). Los métodos no listados cuestan 1.
-HELIUS_CREDITS_PER_REQUEST = {"getTransactionsForAddress": 100}
+# Créditos que cobra Helius por petición. getTransactionsForAddress: 100 con
+# transacciones completas y 10 si solo se piden firmas, según su documentación; el panel
+# de Helius cuadra con estas cifras (Fase 3). Para getSignaturesForAddress no hay cifra
+# publicada a la vista: se cuenta 10 por prudencia (mejor sobrestimar el gasto que
+# quedarse sin créditos). Los métodos no listados cuestan 1.
+HELIUS_CREDITS_PER_REQUEST = {"getTransactionsForAddress": 100, "getSignaturesForAddress": 10}
+GTFA_SIGNATURES_CREDITS = 10
 
 # Máximo de transacciones por página de ``getTransactionsForAddress`` (medido: con
 # 1001 el nodo responde «You can only request up to 1000 transactions at a time»).
@@ -127,9 +131,12 @@ class SolanaRpc:
         delay = min(self._backoff_max, self._backoff_base * 2**attempt)
         return delay * (0.5 + random.random() / 2)  # noqa: S311 (jitter, no criptografía)
 
-    async def call(self, method: str, params: list[Any]) -> Any:
+    async def call(self, method: str, params: list[Any], *, credits: int | None = None) -> Any:
+        """``credits`` sustituye a la tarifa del método cuando depende de los parámetros."""
         last_error: Exception | None = None
         cost = self._credits.get(method, 1)
+        if credits is not None and method in self._credits:
+            cost = credits
         for attempt in range(self._max_attempts):
             if self._budget_check is not None:
                 await self._budget_check(method, cost)
@@ -251,7 +258,14 @@ class SolanaRpc:
             opts["maxSupportedTransactionVersion"] = 1
         if pagination_token:
             opts["paginationToken"] = pagination_token
-        result = await self.call("getTransactionsForAddress", [address, opts]) or {}
+        result = (
+            await self.call(
+                "getTransactionsForAddress",
+                [address, opts],
+                credits=None if full else GTFA_SIGNATURES_CREDITS,
+            )
+            or {}
+        )
         items = list(result.get("data") or [])
         token = result.get("paginationToken") if len(items) == limit else None
         return TransactionPage(items, token or None)

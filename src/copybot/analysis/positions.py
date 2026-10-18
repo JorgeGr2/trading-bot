@@ -94,6 +94,7 @@ class RoundTrip:
     # Solo para operaciones abiertas en ``as_of``: lo que queda y su coste conocido.
     remaining_amount: Decimal = ZERO
     remaining_cost: Decimal = ZERO
+    last_activity_at: datetime | None = None  # última compra, venta o transferencia
 
     @property
     def closed(self) -> bool:
@@ -115,6 +116,14 @@ class RoundTrip:
     @property
     def roi(self) -> Decimal | None:
         return self.pnl / self.priced_cost if self.priced_cost > 0 else None
+
+    @property
+    def abandoned_roi(self) -> Decimal | None:
+        """Rentabilidad de una operación abierta si lo que queda vale 0 (criterio prudente)."""
+        basis = self.cost + self.remaining_cost
+        if self.closed or basis <= 0:
+            return None
+        return (self.proceeds - basis) / basis
 
     @property
     def hold_seconds(self) -> Decimal | None:
@@ -178,6 +187,7 @@ def build_ledger(
                 trip = RoundTrip(tr.mint, tr.time, tr.slot, tr.signature)
                 trips[tr.mint] = trip
                 ledger.round_trips.append(trip)
+            trip.last_activity_at = tr.time
             free = tr.kind == "transfer_in"
             cost = tr.usd if tr.kind == "buy" else None
             queue.append(_Lot(tr.amount, cost, tr.time, free))
@@ -234,6 +244,7 @@ def build_ledger(
 
             trip = trips.get(tr.mint)
             if trip is not None:
+                trip.last_activity_at = tr.time
                 if is_sale:
                     trip.sells += 1
                     if trip.first_sell_at is None:

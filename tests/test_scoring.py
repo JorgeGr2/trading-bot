@@ -29,9 +29,12 @@ GOOD = replace(
     sells=60,
     trades_per_day=D(4),
     round_trips=40,
-    clipped_mean_return=D("0.15"),
-    clipped_stdev_return=D("0.4"),
+    clipped_mean_return=D("0.16"),
     mean_return=D("0.18"),
+    prudent_round_trips=40,
+    prudent_mean_return=D("0.15"),
+    prudent_stdev_return=D("0.4"),
+    prudent_mean_without_top3=D("0.1"),
     first_half_mean_return=D("0.1"),
     second_half_mean_return=D("0.2"),
     pnl_without_top3_usd=D(50),
@@ -46,7 +49,7 @@ GOOD = replace(
     sell_volume_usd=D(1100),
     unmatched_sell_share=D("0.05"),
 )
-RECENT = replace(EMPTY, window_days=7, clipped_mean_return=D("0.05"))
+RECENT = replace(EMPTY, window_days=7, prudent_mean_return=D("0.05"))
 
 
 def test_score_by_hand():
@@ -93,6 +96,14 @@ def test_sniping_needs_enough_checks_to_exclude():
     assert "sniping_sin_comprobar" in {f.code for f in result.flags}  # …pero se avisa
 
 
+def test_abandoned_positions_count_against_the_edge():
+    """Quien solo cierra sus aciertos no puede puntuar por ellos: la ventaja sale de la
+    serie prudente, que incluye sus posiciones abandonadas."""
+    bag_holder = replace(GOOD, clipped_mean_return=D("0.5"), prudent_mean_return=D("-0.2"))
+    result = score_wallet(bag_holder, RECENT, P)
+    assert result.components["ventaja"]["valor"] == 0 and result.score == 0
+
+
 def test_flags():
     risky = replace(
         GOOD,
@@ -119,7 +130,7 @@ def test_flags():
 
 
 def test_without_edge_the_score_is_zero_however_good_the_rest():
-    result = score_wallet(replace(GOOD, clipped_mean_return=D("0.01")), RECENT, P)
+    result = score_wallet(replace(GOOD, prudent_mean_return=D("0.01")), RECENT, P)
     assert result.components["ventaja"]["valor"] == 0
     assert result.quality > D("0.8")
     assert result.eligible and result.score == 0

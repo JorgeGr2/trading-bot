@@ -8,11 +8,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Row, distinct, func, select
+from sqlalchemy import Numeric, Row, case, cast, distinct, func, literal_column, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from copybot.db.models import (
+    CandidateWallet,
     DiscoveryObservation,
     DiscoveryWindow,
     HistoryImport,
@@ -400,6 +401,120 @@ class Repository:
             )
             for r in rows
         ]
+
+    async def add_candidate(self, wallet: str, *, source: str, label: str | None = None) -> bool:
+        """Registra una candidata. Si ya existía, conserva el origen más específico
+        (la leaderboard o el alta manual valen más que el muestreo) y la etiqueta."""
+        wallet = validate_address(wallet)
+        async with self._sessions.begin() as s:
+            stmt = insert(CandidateWallet).values(wallet=wallet, source=source, label=label)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["wallet"],
+                set_={
+                    "label": func.coalesce(stmt.excluded.label, CandidateWallet.label),
+                    "source": case(
+                        (CandidateWallet.source == "relayer", stmt.excluded.source),
+                        else_=CandidateWallet.source,
+                    ),
+                },
+            ).returning(CandidateWallet.wallet, (literal_column("xmax") == 0).label("new"))
+            row = (await s.execute(stmt)).one()
+            return bool(row.new)
+
+    async def wallets_to_screen(self, *, limit: int, max_windows: int | None = None) -> list[str]:
+        """Wallets vistas en el relayer, aún sin filtro de actividad ni historial.
+
+        Orden pseudoaleatorio fijo (por la dirección), para no favorecer a nadie.
+        """
+        obs = DiscoveryObservation
+        stmt = (
+            select(obs.wallet)
+            .group_by(obs.wallet)
+            .where(
+                obs.wallet.not_in(select(HistoryImport.wallet)),
+                obs.wallet.not_in(
+                    select(CandidateWallet.wallet).where(CandidateWallet.screened_at.is_not(None))
+                ),
+            )
+            .order_by(func.md5(obs.wallet))
+            .limit(limit)
+        )
+        if max_windows is not None:
+            stmt = stmt.having(func.count(distinct(obs.window_id)) <= max_windows)
+        async with self._sessions() as s:
+            return list(await s.scalars(stmt))
+
+    async def save_screening(
+        self,
+        wallet: str,
+        *,
+        days: int,
+        transactions: int,
+        capped: bool,
+        screened_at: datetime,
+        source: str = "relayer",
+    ) -> None:
+        async with self._sessions.begin() as s:
+            stmt = insert(CandidateWallet).values(
+                wallet=wallet,
+                source=source,
+                screened_at=screened_at,
+                activity_days=days,
+                recent_transactions=transactions,
+                activity_capped=capped,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["wallet"],
+                set_={
+                    "screened_at": stmt.excluded.screened_at,
+                    "activity_days": stmt.excluded.activity_days,
+                    "recent_transactions": stmt.excluded.recent_transactions,
+                    "activity_capped": stmt.excluded.activity_capped,
+                },
+            )
+            await s.execute(stmt)
+
+    async def candidates_by_activity(
+        self, *, min_per_day: Decimal, max_per_day: Decimal, limit: int, seed: int = 0
+    ) -> list[str]:
+        """Candidatas con el filtro de actividad dentro de la banda, aún sin historial.
+
+        Se eligen al azar (con semilla) dentro de la banda, no por volumen ni por
+        frecuencia: así la muestra no se inclina hacia nadie.
+        """
+        c = CandidateWallet
+        per_day = cast(c.recent_transactions, Numeric) / func.nullif(c.activity_days, 0)
+        stmt = (
+            select(c.wallet)
+            .where(
+                c.screened_at.is_not(None),
+                c.activity_capped.is_(False),
+                per_day >= min_per_day,
+                per_day <= max_per_day,
+                c.wallet.not_in(select(HistoryImport.wallet)),
+            )
+            .order_by(func.md5(func.concat(c.wallet, str(seed))))
+            .limit(limit)
+        )
+        async with self._sessions() as s:
+            return list(await s.scalars(stmt))
+
+    async def candidates_from(self, source: str, *, include_imported: bool = False) -> list[str]:
+        stmt = select(CandidateWallet.wallet).where(CandidateWallet.source == source)
+        if not include_imported:
+            stmt = stmt.where(CandidateWallet.wallet.not_in(select(HistoryImport.wallet)))
+        async with self._sessions() as s:
+            return list(await s.scalars(stmt.order_by(CandidateWallet.wallet)))
+
+    async def candidate_info(self, wallets: Iterable[str]) -> dict[str, CandidateWallet]:
+        wallets = list(wallets)
+        if not wallets:
+            return {}
+        async with self._sessions() as s:
+            rows = await s.scalars(
+                select(CandidateWallet).where(CandidateWallet.wallet.in_(wallets))
+            )
+            return {r.wallet: r for r in rows}
 
     # --- Tokens -------------------------------------------------------------------
 

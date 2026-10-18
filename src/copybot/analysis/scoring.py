@@ -32,7 +32,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from copybot.analysis.metrics import ANALYZER_VERSION, AnalysisParams, WindowMetrics
 
-SCORING_VERSION = "1"
+# 2: ventaja y consistencia con la serie prudente (incluye las posiciones abandonadas) y
+#    robustez «sin las 3 mejores» por operación, no en dólares.
+SCORING_VERSION = "2"
 
 
 class ScoringParams(BaseSettings):
@@ -181,10 +183,14 @@ def _secs(value: Decimal | None) -> str:
 
 
 def edge_lower_bound(m: WindowMetrics, z: Decimal) -> Decimal | None:
-    """Estimación prudente de la rentabilidad media por operación (antes de costes)."""
-    if m.clipped_mean_return is None or m.clipped_stdev_return is None or m.round_trips < 2:
+    """Estimación prudente de la rentabilidad media por operación (antes de costes).
+
+    Usa la serie prudente: operaciones cerradas y posiciones abandonadas (a 0).
+    """
+    n = m.prudent_round_trips
+    if m.prudent_mean_return is None or m.prudent_stdev_return is None or n < 2:
         return None
-    return m.clipped_mean_return - z * m.clipped_stdev_return / Decimal(m.round_trips).sqrt()
+    return m.prudent_mean_return - z * m.prudent_stdev_return / Decimal(n).sqrt()
 
 
 def score_wallet(m: WindowMetrics, recent: WindowMetrics, p: ScoringParams) -> ScoreResult:
@@ -235,18 +241,20 @@ def score_wallet(m: WindowMetrics, recent: WindowMetrics, p: ScoringParams) -> S
         "valor": _clamp(net / p.target_edge) if net is not None else Decimal(0),
         "peso": None,
         "detalle": (
-            f"rentabilidad media por operación {_pct(m.mean_return)}; con un tope por "
-            f"operación (media robusta): {_pct(m.clipped_mean_return)}; estimación prudente "
-            f"{_pct(lb)}; tras restar el coste estimado de copiar ({p.copy_cost:.0%}): "
-            f"{_pct(net)} (vale 1 con {_pct(p.target_edge)})"
+            f"rentabilidad media por operación cerrada {_pct(m.mean_return)}; con un tope "
+            f"por operación (media robusta): {_pct(m.clipped_mean_return)}; contando como "
+            f"pérdida lo que queda en {m.abandoned_round_trips} posiciones abandonadas: "
+            f"{_pct(m.prudent_mean_return)}; estimación prudente {_pct(lb)}; tras restar el "
+            f"coste estimado de copiar ({p.copy_cost:.0%}): {_pct(net)} "
+            f"(vale 1 con {_pct(p.target_edge)})"
         ),
     }
 
     checks = {
         "primera mitad del periodo en positivo": m.first_half_mean_return,
         "segunda mitad en positivo": m.second_half_mean_return,
-        f"últimos {recent.window_days} días en positivo": recent.clipped_mean_return,
-        "PnL positivo sin sus 3 mejores operaciones": m.pnl_without_top3_usd,
+        f"últimos {recent.window_days} días en positivo": recent.prudent_mean_return,
+        "en positivo sin sus 3 mejores operaciones": m.prudent_mean_without_top3,
     }
     passed = [name for name, value in checks.items() if value is not None and value > 0]
     result.components["consistencia"] = {

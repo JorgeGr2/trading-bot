@@ -108,3 +108,96 @@ async def test_token_creation_lookup_is_cached_and_bounded(repo):
     assert times[MEME] == created
     assert times[mints[2]] is None  # consultado, sin transacciones
     assert rpc.calls[0]["order"] == "asc"
+
+
+# --- Wallets poco activas y alta manual -------------------------------------------
+
+
+class SignaturesRpc:
+    def __init__(self, by_wallet):
+        self.by_wallet = by_wallet
+
+    async def get_signatures_for_address(self, address, *, limit=1000, **_):
+        return self.by_wallet.get(address, [])[:limit]
+
+
+def _sigs(n: int, every_hours: float, failed_every: int = 0):
+    return [
+        {
+            "signature": f"s{i}",
+            "blockTime": int((NOW - timedelta(hours=every_hours * i)).timestamp()),
+            "err": {"x": 1} if failed_every and i % failed_every == 0 else None,
+        }
+        for i in range(n)
+    ]
+
+
+async def test_activity_screening_counts_recent_successful_transactions(repo):
+    from copybot.ingest.discovery import ActivityScreener
+
+    rpc = SignaturesRpc(
+        {
+            # 1 al día durante 100 días: hoy y los 37 días anteriores (límite incluido) → 38
+            A: _sigs(100, every_hours=24),
+            B: _sigs(1000, every_hours=0.1),  # 1.000 en 4 días: la consulta se queda corta
+        }
+    )
+    screener = ActivityScreener(rpc, repo, days=37, clock=lambda: NOW)
+    low = await screener.screen(A)
+    high = await screener.screen(B)
+    assert (low.transactions, low.capped) == (38, False)
+    assert high.capped
+    failed = await ActivityScreener(
+        SignaturesRpc({A: _sigs(10, 24, failed_every=2)}), repo, clock=lambda: NOW
+    ).screen(A)
+    assert failed.transactions == 5  # las fallidas no cuentan
+
+
+async def test_activity_band_selection(repo):
+    from decimal import Decimal
+
+    for wallet, txs, capped in [(A, 37, False), (B, 600, False), (MEME, 1000, True)]:
+        await repo.save_screening(wallet, days=37, transactions=txs, capped=capped, screened_at=NOW)
+    pick = await repo.candidates_by_activity(
+        min_per_day=Decimal("0.7"), max_per_day=Decimal(15), limit=10
+    )
+    assert pick == [A]  # 1/día; B hace 16,2/día; MEME supera el máximo de la consulta
+    await repo.save_history_import(
+        A,
+        covered_from=NOW - timedelta(days=37),
+        covered_to=NOW,
+        truncated=False,
+        transactions=37,
+        credits=100,
+    )
+    assert (
+        await repo.candidates_by_activity(
+            min_per_day=Decimal("0.7"), max_per_day=Decimal(15), limit=10
+        )
+        == []
+    )
+
+
+async def test_screening_queue_skips_screened_and_imported(repo):
+    s = sampler(relayer_rpc(), repo, per_window=10)
+    await s.sample_window(NOW - timedelta(days=1))
+    assert sorted(await repo.wallets_to_screen(limit=10)) == sorted([A, B])
+    await repo.save_screening(A, days=37, transactions=3, capped=False, screened_at=NOW)
+    assert await repo.wallets_to_screen(limit=10) == [B]
+    assert await repo.wallets_to_screen(limit=10, max_windows=0) == []
+
+
+async def test_manual_candidates_keep_the_most_specific_source(repo):
+    assert await repo.add_candidate(A, source="leaderboard", label="@uno, puesto 1")
+    assert not await repo.add_candidate(A, source="manual")  # ya existía
+    await repo.save_screening(A, days=37, transactions=3, capped=False, screened_at=NOW)
+    info = (await repo.candidate_info([A]))[A]
+    assert (info.source, info.label, info.recent_transactions) == (
+        "leaderboard",
+        "@uno, puesto 1",
+        3,
+    )
+    await repo.save_screening(B, days=37, transactions=3, capped=False, screened_at=NOW)
+    await repo.add_candidate(B, source="manual")
+    assert (await repo.candidate_info([B]))[B].source == "manual"  # «relayer» se mejora
+    assert await repo.candidates_from("leaderboard") == [A]

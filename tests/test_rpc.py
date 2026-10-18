@@ -112,8 +112,13 @@ async def test_usage_callback():
     ) as rpc:
         await rpc.get_signatures_for_address("addr", until="x")
         await rpc.get_transactions_for_address("addr", full=False)
-    assert seen == [("getSignaturesForAddress", 1, 1), ("getTransactionsForAddress", 1, 100)]
-    assert rpc.credits["getTransactionsForAddress"] == 100
+        await rpc.get_transactions_for_address("addr", full=True)
+    assert seen == [
+        ("getSignaturesForAddress", 1, 10),
+        ("getTransactionsForAddress", 1, 10),  # solo firmas
+        ("getTransactionsForAddress", 1, 100),  # transacciones completas
+    ]
+    assert rpc.credits["getTransactionsForAddress"] == 110
 
 
 @respx.mock

@@ -115,6 +115,17 @@ REAL_CASES = [
         "16378797.554909",
         "-444.000000",
     ),
+    # FOMO cobra 2.039.280 lamports por la cuenta nueva y devuelve 1.488.440 al cerrar
+    # una cuenta temporal de wSOL: el usuario queda en −0,00055084 SOL además de los 50
+    # USDC. Es coste de cuentas, no parte del precio (1.724 casos en la Fase 3).
+    (
+        "fomo_buy_account_cost_sol",
+        "GqvndQ2bxjNL2Sn7dcxo2ESPAWSDaR9nsB7x3LZ6W7Jd",
+        EventKind.BUY,
+        "GTBxUiw6wJdmmkCGZgRHLyYxqu1vG4KtRpeox6yDpump",
+        "15946.910770",
+        "-50.000000",
+    ),
 ]
 
 
@@ -414,6 +425,25 @@ def test_route_residue_is_reported_not_traded():
         "se ignora el resto de ruta de TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo "
         "(+0.000813, 0.69 % de lo que pasó por la wallet)",
     )
+
+
+def test_small_sol_next_to_a_stable_payment_is_an_account_cost():
+    [ev] = classify(load("fomo_buy_account_cost_sol"), None, RELAYERS)
+    assert ev.reasons == (
+        "se ignora un movimiento de -0.00055084 SOL junto al pago en USDC: renta de cuentas "
+        "o comisión, no forma parte del precio",
+    )
+
+
+def test_larger_sol_next_to_a_stable_payment_stays_ambiguous():
+    """Comprar a la vez el token y algo de SOL con el mismo USDC no es una compra simple."""
+    tx = synthetic_tx(
+        accounts=[(W, True), (W_USDC, False), (W_MEME, False)],
+        lamports=[(10**9, 10**9 + 8_000_000), (2_000_000,) * 2, (2_000_000,) * 2],
+        token_balances=[(1, W, USDC_MINT, 100_000_000, 0), (2, W, MEME, 0, 5_000_000)],
+    )
+    [ev] = classify(tx, {W})
+    assert ev.kind is EventKind.AMBIGUOUS
 
 
 def test_pumpfun_fee_distribution_is_a_transfer_not_a_buy():

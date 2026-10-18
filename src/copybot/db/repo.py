@@ -31,8 +31,9 @@ from copybot.db.models import (
 from copybot.solana.addresses import validate_address
 from copybot.solana.classifier import TxSummary, WalletEvent
 
-# 2: los restos de un token intermedio de la ruta ya no convierten la compra en ambigua,
-#    y solo se descuenta la renta de las cuentas propias de la wallet.
+# 2: los restos de un token intermedio de la ruta ya no convierten la compra en ambigua;
+#    solo se descuenta la renta de las cuentas propias de la wallet, y un movimiento
+#    pequeño de SOL junto a un pago en USDC/USDT se trata como coste de cuentas.
 CLASSIFIER_VERSION = "2"
 
 

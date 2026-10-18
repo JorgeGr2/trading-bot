@@ -1,9 +1,17 @@
 """Puntuación de traders: configurable, explicada y versionada.
 
 Primero se aplican **filtros de exclusión** (muestra insuficiente, no copiable, datos
-incompletos…). Solo las wallets que los superan reciben una puntuación de 0 a 100, que
-combina cinco componentes con pesos configurables. Cada decisión va acompañada de su
-explicación en texto.
+incompletos…). Solo las wallets que los superan reciben una puntuación de 0 a 100:
+
+    puntuación = 100 × ventaja × calidad
+
+* **Ventaja** (0 a 1): rentabilidad media por operación, estimada con prudencia y
+  descontando el coste de copiar. Sin ventaja la puntuación es 0, por bien que puntúe
+  lo demás: copiar a alguien que pierde por operación solo puede perder.
+* **Calidad** (0 a 1): media ponderada de consistencia, facilidad para copiarlo,
+  riesgo y calidad de los datos (pesos configurables).
+
+Cada decisión va acompañada de su explicación en texto.
 
 La puntuación es una **hipótesis** sobre qué traders merece la pena simular, no una
 predicción de beneficios: se validará con la simulación (Fases 4, 5 y 8). Sus
@@ -53,11 +61,11 @@ class ScoringParams(BaseSettings):
     good_first_sell_seconds: int = Field(default=600, gt=0)
     comfortable_trades_per_day: Decimal = Field(default=Decimal("50"), gt=0)
     drawdown_for_zero: Decimal = Field(default=Decimal("0.6"), gt=0, le=1)
-    weight_edge: Decimal = Decimal("0.40")
-    weight_consistency: Decimal = Decimal("0.15")
-    weight_copyability: Decimal = Decimal("0.20")
-    weight_risk: Decimal = Decimal("0.15")
-    weight_data: Decimal = Decimal("0.10")
+    # Pesos de la calidad (deben sumar 1). La ventaja no tiene peso: multiplica.
+    weight_consistency: Decimal = Decimal("0.25")
+    weight_copyability: Decimal = Decimal("0.35")
+    weight_risk: Decimal = Decimal("0.25")
+    weight_data: Decimal = Decimal("0.15")
 
     @model_validator(mode="after")
     def _check(self) -> ScoringParams:
@@ -73,8 +81,8 @@ class ScoringParams(BaseSettings):
         return self
 
     def weights(self) -> dict[str, Decimal]:
+        """Pesos de los componentes de la calidad."""
         return {
-            "ventaja": self.weight_edge,
             "consistencia": self.weight_consistency,
             "copiable": self.weight_copyability,
             "riesgo": self.weight_risk,
@@ -119,6 +127,7 @@ class ScoreResult:
     exclusions: list[str] = field(default_factory=list)
     components: dict[str, dict[str, Any]] = field(default_factory=dict)
     flags: list[Flag] = field(default_factory=list)
+    quality: Decimal | None = None
 
     def explanation(self) -> list[str]:
         lines: list[str] = []
@@ -128,15 +137,27 @@ class ScoreResult:
             lines.append("Excluido de la puntuación:")
             lines += [f"  - {reason}" for reason in self.exclusions]
         for name, comp in self.components.items():
-            head = f"{name.capitalize()} ({comp['valor']:.2f} × peso {comp['peso']})"
+            if comp["peso"] is None:
+                head = f"{name.capitalize()} ({comp['valor']:.2f}, multiplica a la calidad)"
+            else:
+                head = f"{name.capitalize()} ({comp['valor']:.2f} × peso {comp['peso']})"
             lines.append(f"{head}: {comp['detalle']}")
+        if self.quality is not None:
+            lines.append(
+                f"Calidad {self.quality:.2f}: media ponderada de consistencia, copiable, "
+                "riesgo y datos."
+            )
         for flag in self.flags:
             lines.append(f"Aviso ({flag.confidence}): {flag.detail}")
         return lines
 
     def components_json(self) -> dict[str, Any]:
         return {
-            name: {"valor": str(c["valor"]), "peso": str(c["peso"]), "detalle": c["detalle"]}
+            name: {
+                "valor": str(c["valor"]),
+                "peso": None if c["peso"] is None else str(c["peso"]),
+                "detalle": c["detalle"],
+            }
             for name, c in self.components.items()
         }
 
@@ -212,7 +233,7 @@ def score_wallet(m: WindowMetrics, recent: WindowMetrics, p: ScoringParams) -> S
     net = lb - p.copy_cost if lb is not None else None
     result.components["ventaja"] = {
         "valor": _clamp(net / p.target_edge) if net is not None else Decimal(0),
-        "peso": weights["ventaja"],
+        "peso": None,
         "detalle": (
             f"rentabilidad media por operación {_pct(m.mean_return)}; con un tope por "
             f"operación (media robusta): {_pct(m.clipped_mean_return)}; estimación prudente "
@@ -294,8 +315,12 @@ def score_wallet(m: WindowMetrics, recent: WindowMetrics, p: ScoringParams) -> S
     if result.exclusions:
         result.eligible = False
         return result
-    total = sum((c["valor"] * c["peso"] for c in result.components.values()), Decimal(0))
-    result.score = (total * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+    result.quality = sum(
+        (c["valor"] * c["peso"] for c in result.components.values() if c["peso"] is not None),
+        Decimal(0),
+    )
+    edge = result.components["ventaja"]["valor"]
+    result.score = (100 * edge * result.quality).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
     return result
 
 

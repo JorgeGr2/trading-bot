@@ -83,7 +83,7 @@ def test_json_is_serializable_and_exact():
 
 
 def _random_trades(seed: int):
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 (datos de prueba)
     trades = []
     for i in range(80):
         moment = at(1) + timedelta(seconds=rng.randint(0, 14 * 86400))

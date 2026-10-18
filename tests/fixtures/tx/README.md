@@ -21,6 +21,7 @@ balances de token antes y después de cada transacción.
 | `fomo_buy_route_residue_token2022.json` | `jF5CtiSv9P…` | Compra USDC → token intermedio → memecoin. El intermedio entra y sale de la wallet y deja un resto del 0,69 % (Fase 3) |
 | `fomo_buy_route_residue_9bb6.json` | `3ybKr3r8iu…` | Igual, con otro intermedio y un resto del 0,89 % (Fase 3) |
 | `fomo_buy_fee_account_rent.json` | `4X7ciHuuT6…` | Compra en la que la instrucción `create` nombra a la wallet como pagadora de la cuenta de comisiones de **otra** wallet, aunque los lamports los pone el relayer. La renta no es del usuario (Fase 3) |
+| `fomo_buy_account_cost_sol.json` | `5awKAmqu4a…` | Compra en USDC en la que FOMO cobra 2.039.280 lamports por la cuenta nueva y devuelve 1.488.440 al cerrar una cuenta temporal de wSOL: el usuario queda en −0,00055084 SOL, que es coste de cuentas y no parte del precio (Fase 3) |
 | `pumpfun_fee_distribution_transfer_in.json` | `5jeXu29sYU…` | Reparto automático de pump.fun a los poseedores de un token: la wallet recibe tokens sin firmar ni pagar. Es una transferencia, no una compra (Fase 3) |
 
 Las transacciones sintéticas se generan en el código de los tests y se identifican

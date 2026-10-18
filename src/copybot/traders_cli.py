@@ -226,15 +226,29 @@ async def ranking(ctx: Context, limit: int) -> None:
     if not scores:
         print("No hay puntuaciones con los parámetros actuales: ejecuta «copybot analyze».")
         return
-    print(
-        f"{'#':>3}  {'wallet':44}  {'puntos':>6}  {'oper.':>5}  {'media/op':>9}  "
-        f"{'1ª venta':>9}  motivo principal"
-    )
-    for i, s in enumerate(scores[:limit], start=1):
+    rows = []
+    for s in scores:
         snap = await ctx.repo.metric_snapshot(
             s.wallet, s.as_of, analyzer.scoring.window_days, analyzer.metrics_hash
         )
-        m = snap.metrics if snap else {}
+        rows.append((s, snap.metrics if snap else {}))
+
+    def order(row: tuple) -> tuple:
+        # Puntuables primero; a igual puntuación (p. ej. 0), mejor rentabilidad media.
+        s, m = row
+        mean = m.get("clipped_mean_return")
+        return (
+            not s.eligible,
+            -(s.score if s.score is not None else Decimal(-1)),
+            -(Decimal(mean) if mean is not None else Decimal(-100)),
+        )
+
+    rows.sort(key=order)
+    print(
+        f"{'#':>3}  {'wallet':44}  {'puntos':>6}  {'oper.':>5}  {'media/op':>9}  "
+        f"{'1ª venta':>9}  motivo de exclusión"
+    )
+    for i, (s, m) in enumerate(rows[:limit], start=1):
         first = m.get("median_seconds_to_first_sell")
         first_txt = "—" if first is None else f"{Decimal(first):.0f} s"
         reason = s.explanation[1].strip(" -") if not s.eligible and len(s.explanation) > 1 else ""

@@ -59,10 +59,12 @@ def test_score_by_hand():
     assert comps["copiable"] == 1
     assert comps["riesgo"] == D("0.5")  # 1 − 0,3/0,6
     assert comps["datos"] == D("0.95")
-    # 100 · (0,4·0,5675 + 0,15 + 0,2 + 0,15·0,5 + 0,1·0,95) = 74,70
-    assert result.score == D("74.70")
+    # Calidad: 0,25·1 + 0,35·1 + 0,25·0,5 + 0,15·0,95 = 0,8675
+    assert result.quality == D("0.8675")
+    # 100 · 0,567544 · 0,8675 = 49,23
+    assert result.score == D("49.23")
     text = "\n".join(result.explanation())
-    assert text.startswith("Puntuación 74.70/100.")
+    assert text.startswith("Puntuación 49.23/100.")
     assert "tras restar el coste estimado de copiar (3%)" in text
 
 
@@ -116,14 +118,16 @@ def test_flags():
     }
 
 
-def test_negative_edge_scores_zero_on_that_component():
+def test_without_edge_the_score_is_zero_however_good_the_rest():
     result = score_wallet(replace(GOOD, clipped_mean_return=D("0.01")), RECENT, P)
     assert result.components["ventaja"]["valor"] == 0
+    assert result.quality > D("0.8")
+    assert result.eligible and result.score == 0
 
 
 def test_params_are_validated():
     with pytest.raises(ValidationError):
-        ScoringParams(_env_file=None, weight_edge=D("0.5"))  # ya no suman 1
+        ScoringParams(_env_file=None, weight_data=D("0.5"))  # ya no suman 1
     with pytest.raises(ValidationError):
         ScoringParams(_env_file=None, recent_window_days=40)
 

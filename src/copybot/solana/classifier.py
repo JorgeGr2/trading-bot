@@ -35,6 +35,11 @@ TOKEN_DUST_RAW_UNITS = 100
 # de lo que pasó por la wallet, se trata como resto de ruta y no como otra operación
 # (medido en la Fase 3: restos del 0,7-0,9 % en rutas USDC → token intermedio → memecoin).
 ROUTE_RESIDUE_MAX_FRACTION = Decimal("0.02")
+# Si el pago es en USDC o USDT, un movimiento de SOL de como mucho esto (unas dos rentas
+# de cuenta de token) es coste de cuentas o comisión, no parte del precio. Caso real
+# (Fase 3): FOMO cobra 2.039.280 lamports por la cuenta nueva y devuelve 1.488.440 al
+# cerrar una cuenta temporal de wSOL; el usuario queda en −550.840 lamports.
+ACCOUNT_COSTS_MAX_LAMPORTS = 3_000_000
 _TRANSFER_TYPES = ("transfer", "transferChecked", "transferCheckedWithFee")
 
 
@@ -400,6 +405,13 @@ def _classify(
             continue
 
         mint, token_delta = next(iter(token_deltas.items()))
+        stables = [q for q in quote_deltas if q != "SOL"]
+        if "SOL" in quote_deltas and len(stables) == 1 and abs(sol) <= ACCOUNT_COSTS_MAX_LAMPORTS:
+            reasons.append(
+                f"se ignora un movimiento de {quote_deltas['SOL']:+} SOL junto al pago en "
+                f"{stables[0]}: renta de cuentas o comisión, no forma parte del precio"
+            )
+            del quote_deltas["SOL"]
         opposite = {q: d for q, d in quote_deltas.items() if (d > 0) != (token_delta > 0)}
         same_side = {q: d for q, d in quote_deltas.items() if (d > 0) == (token_delta > 0)}
 

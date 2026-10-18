@@ -429,6 +429,7 @@ class SimPosition(Base):
     proceeds_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))
     realized_pnl_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))
     rent_lamports: Mapped[int] = mapped_column(BigInteger, default=0)  # recuperable al cerrar
+    rent_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))  # pagado al abrir
     # Copia teórica: lo que habría pasado comprando y vendiendo al precio del trader.
     theoretical_entry_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
     theoretical_proceeds_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))

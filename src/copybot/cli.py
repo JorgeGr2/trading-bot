@@ -49,8 +49,8 @@ async def _monitor(settings: Settings) -> int:
     engine = make_engine(settings.database_url.get_secret_value())
     repo = Repository(make_sessionmaker(engine))
 
-    async def on_usage(method: str, requests: int) -> None:
-        await repo.record_usage(provider, method, requests, credits=requests)
+    async def on_usage(method: str, requests: int, credits: int) -> None:
+        await repo.record_usage(provider, method, requests, credits=credits)
 
     rpc = SolanaRpc(
         rpc_url,

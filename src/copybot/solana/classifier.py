@@ -30,6 +30,12 @@ SOL_DUST_LAMPORTS = 10_000
 # Variaciones de un token de como mucho estas unidades mínimas se consideran polvo
 # (p. ej. 0,00000001 de un token intermedio que la ruta deja en la wallet).
 TOKEN_DUST_RAW_UNITS = 100
+# Un token que entra y sale de la wallet en la misma transacción es un paso
+# intermedio de la ruta del swap. Si el resto que queda es como mucho esta fracción
+# de lo que pasó por la wallet, se trata como resto de ruta y no como otra operación
+# (medido en la Fase 3: restos del 0,7-0,9 % en rutas USDC → token intermedio → memecoin).
+ROUTE_RESIDUE_MAX_FRACTION = Decimal("0.02")
+_TRANSFER_TYPES = ("transfer", "transferChecked", "transferCheckedWithFee")
 
 
 class EventKind(StrEnum):
@@ -210,6 +216,38 @@ def _rent_flows(tx: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
     return funder_of, close_destination_of
 
 
+def _gross_token_flows(
+    tx: dict[str, Any], keys: list[_Account], token_accounts: dict[int, _TokenAccountState]
+) -> dict[tuple[str, str], list[int]]:
+    """Entradas y salidas brutas por (owner, mint) según las instrucciones de transferencia.
+
+    A diferencia de los balances netos, permite ver que un token ha pasado por la
+    wallet (entra y sale) aunque al final apenas cambie su saldo.
+    """
+    account_of: dict[str, _TokenAccountState] = {
+        keys[idx].pubkey: st for idx, st in token_accounts.items()
+    }
+    flows: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for ix in _parsed_instructions(tx):
+        if ix.get("program") not in ("spl-token", "spl-token-2022"):
+            continue
+        if ix["parsed"].get("type") not in _TRANSFER_TYPES:
+            continue
+        info = ix["parsed"].get("info") or {}
+        src = account_of.get(info.get("source", ""))
+        dst = account_of.get(info.get("destination", ""))
+        amount_info = info.get("tokenAmount") or {}
+        raw = amount_info.get("amount", info.get("amount"))
+        if raw is None or (src is None and dst is None):
+            continue
+        amount = int(raw)
+        if src is not None and src.owner is not None:
+            flows[(src.owner, src.mint)][1] += amount
+        if dst is not None and dst.owner is not None:
+            flows[(dst.owner, dst.mint)][0] += amount
+    return flows
+
+
 def classify(
     tx: dict[str, Any],
     wallets: set[str] | None = None,
@@ -262,6 +300,7 @@ def _classify(
             by_owner[st.owner][st.mint] += st.post - st.pre
 
     has_swap_program = bool(summary.programs & KNOWN_SWAP_PROGRAMS.keys())
+    gross_flows: dict[tuple[str, str], list[int]] | None = None
     events: list[WalletEvent] = []
     for wallet in candidates:
         if wallet not in index_of and wallet not in by_owner:
@@ -285,6 +324,12 @@ def _classify(
         # cerrarlas: no forma parte del precio. Para wSOL, los lamports de la cuenta
         # incluyen el saldo envuelto, que ya se ha contado arriba.
         for idx, st in token_accounts.items():
+            # Solo la renta de cuentas propias es recuperable por la wallet. La de una
+            # cuenta ajena (p. ej. la de comisiones de FOMO) no es inventario suyo; además
+            # la instrucción ``create`` puede nombrar como pagadora a la wallet aunque los
+            # lamports los ponga otro (caso real `4X7ciHuu…`, Fase 3).
+            if st.owner != wallet:
+                continue
             pubkey = keys[idx].pubkey
             content_pre = st.pre if st.mint == WSOL_MINT else 0
             content_post = st.post if st.mint == WSOL_MINT else 0
@@ -313,6 +358,26 @@ def _classify(
 
         if not token_deltas:
             continue  # Sin cambios de memecoins: nada que copiar.
+
+        if len(token_deltas) > 1:
+            if gross_flows is None:
+                gross_flows = _gross_token_flows(tx, keys, token_accounts)
+            for mint in list(token_deltas):
+                inflow, outflow = gross_flows.get((wallet, mint), (0, 0))
+                residue = abs(by_owner[wallet][mint])
+                if (
+                    inflow
+                    and outflow
+                    and residue <= ROUTE_RESIDUE_MAX_FRACTION * max(inflow, outflow)
+                ):
+                    pct = Decimal(residue * 100) / max(inflow, outflow)
+                    reasons.append(
+                        f"se ignora el resto de ruta de {mint} ({token_deltas[mint]:+}, "
+                        f"{pct:.2f} % de lo que pasó por la wallet)"
+                    )
+                    del token_deltas[mint]
+            if not token_deltas:
+                continue
 
         if len(token_deltas) > 1:
             events.append(

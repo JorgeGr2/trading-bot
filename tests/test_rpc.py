@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import respx
 
-from copybot.solana.rpc import RateLimiter, RpcError, SolanaRpc
+from copybot.solana.rpc import HELIUS_CREDITS_PER_REQUEST, RateLimiter, RpcError, SolanaRpc
 
 URL = "https://rpc.example.com/?api-key=SECRETO123"
 
@@ -96,14 +98,91 @@ async def test_get_transaction_requests_v1_and_jsonparsed():
 @respx.mock
 async def test_usage_callback():
     respx.post(URL).mock(return_value=ok([]))
-    seen: list[tuple[str, int]] = []
+    seen: list[tuple[str, int, int]] = []
 
-    async def on_usage(method: str, n: int) -> None:
-        seen.append((method, n))
+    async def on_usage(method: str, n: int, credits: int) -> None:
+        seen.append((method, n, credits))
 
-    async with SolanaRpc(URL, rate_per_second=1000, on_usage=on_usage, sleep=Sleeper()) as rpc:
+    async with SolanaRpc(
+        URL,
+        rate_per_second=1000,
+        on_usage=on_usage,
+        credits_per_request=HELIUS_CREDITS_PER_REQUEST,
+        sleep=Sleeper(),
+    ) as rpc:
         await rpc.get_signatures_for_address("addr", until="x")
-    assert seen == [("getSignaturesForAddress", 1)]
+        await rpc.get_transactions_for_address("addr", full=False)
+    assert seen == [("getSignaturesForAddress", 1, 1), ("getTransactionsForAddress", 1, 100)]
+    assert rpc.credits["getTransactionsForAddress"] == 100
+
+
+@respx.mock
+async def test_budget_check_runs_before_the_request_and_can_block_it():
+    route = respx.post(URL).mock(return_value=ok(1))
+    checked: list[tuple[str, int]] = []
+
+    class Blocked(Exception):
+        pass
+
+    async def budget_check(method: str, credits: int) -> None:
+        checked.append((method, credits))
+        if method == "getTransactionsForAddress":
+            raise Blocked
+
+    async with SolanaRpc(
+        URL,
+        rate_per_second=1000,
+        budget_check=budget_check,
+        credits_per_request=HELIUS_CREDITS_PER_REQUEST,
+        sleep=Sleeper(),
+    ) as rpc:
+        assert await rpc.get_slot() == 1
+        with pytest.raises(Blocked):
+            await rpc.get_transactions_for_address("addr", full=True)
+    assert route.call_count == 1  # la petición bloqueada no llega a enviarse
+    assert checked == [("getSlot", 1), ("getTransactionsForAddress", 100)]
+    assert rpc.usage["getTransactionsForAddress"] == 0
+
+
+@respx.mock
+async def test_gtfa_builds_filters_and_stops_on_short_page():
+    page = {"data": [{"signature": "a"}, {"signature": "b"}], "paginationToken": "9:1"}
+    route = respx.post(URL).mock(return_value=ok(page))
+    async with SolanaRpc(URL, rate_per_second=1000, sleep=Sleeper()) as rpc:
+        full = await rpc.get_transactions_for_address(
+            "addr",
+            full=True,
+            limit=2,
+            block_time_gte=100,
+            block_time_lt=200,
+            pagination_token="5:3",
+        )
+        short = await rpc.get_transactions_for_address("addr", full=False, limit=3)
+    first = json.loads(route.calls[0].request.content)["params"][1]
+    assert first == {
+        "transactionDetails": "full",
+        "limit": 2,
+        "sortOrder": "desc",
+        "filters": {
+            "tokenAccounts": "balanceChanged",
+            "status": "succeeded",
+            "blockTime": {"gte": 100, "lt": 200},
+        },
+        "encoding": "jsonParsed",
+        "maxSupportedTransactionVersion": 1,
+        "paginationToken": "5:3",
+    }
+    # Página llena: hay que seguir. Página incompleta: no hay más (el nodo devuelve
+    # token igualmente, pero la siguiente página llegaría vacía y costaría créditos).
+    assert full.pagination_token == "9:1"
+    assert short.pagination_token is None
+    assert [i["signature"] for i in short.items] == ["a", "b"]
+
+
+async def test_gtfa_rejects_out_of_range_limit():
+    async with SolanaRpc(URL, rate_per_second=1000, sleep=Sleeper()) as rpc:
+        with pytest.raises(ValueError):
+            await rpc.get_transactions_for_address("addr", full=True, limit=1001)
 
 
 async def test_rate_limiter_spaces_requests():

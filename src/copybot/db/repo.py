@@ -23,7 +23,8 @@ from copybot.db.models import (
 from copybot.solana.addresses import validate_address
 from copybot.solana.classifier import TxSummary, WalletEvent
 
-CLASSIFIER_VERSION = "1"
+# 2: los restos de un token intermedio de la ruta ya no convierten la compra en ambigua.
+CLASSIFIER_VERSION = "2"
 
 
 def _ts(epoch: int | None) -> datetime | None:

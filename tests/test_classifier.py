@@ -85,6 +85,36 @@ REAL_CASES = [
         "30279.536642",
         "-487.571354",
     ),
+    # Rutas USDC → token intermedio → memecoin que dejan en la wallet un resto del
+    # intermedio mayor que el polvo (0,69 % y 0,89 % de lo que pasó por ella). Con el
+    # clasificador v1 quedaban como ambiguas; son compras normales.
+    (
+        "fomo_buy_route_residue_token2022",
+        "7ab7MBy948MFi6NbRzcdoAFVU7sMycMzAo1t3RyCwFtm",
+        EventKind.BUY,
+        "DKYcjobF7HPtL9RyQBRdeRQ2iWvizpfbgWwPWNXdpump",
+        "176163.768233",
+        "-25.000000",
+    ),
+    (
+        "fomo_buy_route_residue_9bb6",
+        "7ab7MBy948MFi6NbRzcdoAFVU7sMycMzAo1t3RyCwFtm",
+        EventKind.BUY,
+        "DrzAtxfTZQtvfCr45NM4H6gYoSridMWWusxn7pmzpump",
+        "107538.895215",
+        "-12.946971",
+    ),
+    # La wallet figura como pagadora de la cuenta de comisiones de otra wallet, pero los
+    # lamports los pone el relayer. El clasificador v1 le atribuía esa renta y la
+    # compra quedaba ambigua (SOL +0,00148844 junto a USDC −444).
+    (
+        "fomo_buy_fee_account_rent",
+        "FpYqABXnVFF8jg2FBLvgFwNxa3Sm5dB2oqrtGLu2tvjT",
+        EventKind.BUY,
+        "BnhSAHEfQU1VaczcnmiqioJG1xnU7tfhX91wCkCopump",
+        "16378797.554909",
+        "-444.000000",
+    ),
 ]
 
 
@@ -376,6 +406,72 @@ def test_malformed_transaction_is_rejected():
 def test_route_dust_is_reported_not_traded():
     [ev] = classify(load("fomo_buy_with_route_dust"), None, RELAYERS)
     assert any("polvo" in r for r in ev.reasons)
+
+
+def test_route_residue_is_reported_not_traded():
+    [ev] = classify(load("fomo_buy_route_residue_token2022"), None, RELAYERS)
+    assert ev.reasons == (
+        "se ignora el resto de ruta de TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo "
+        "(+0.000813, 0.69 % de lo que pasó por la wallet)",
+    )
+
+
+def test_pumpfun_fee_distribution_is_a_transfer_not_a_buy():
+    """Reparto automático de pump.fun a los poseedores (firma y paga otra wallet)."""
+    [ev] = classify(load("pumpfun_fee_distribution_transfer_in"), {W}, RELAYERS)
+    assert ev.kind is EventKind.TRANSFER_IN
+    assert ev.token_delta == Decimal("4.701609")
+    assert ev.counterparties == ("9nwP5sM7wfx9P7EbSDHTg6LUmYwSwujzAGbscYAVd3HZ",)
+    assert not ev.wallet_is_signer
+    assert not ev.usable_as_signal
+
+
+def _transfer(source: str, destination: str, amount: int) -> dict[str, Any]:
+    return {
+        "program": "spl-token",
+        "programId": TOKEN_PROGRAM,
+        "parsed": {
+            "type": "transfer",
+            "info": {"source": source, "destination": destination, "amount": str(amount)},
+        },
+    }
+
+
+W_USDC = "WAcc1111111111111111111111111111111111111111"
+W_MID = "WAcc2222222222222222222222222222222222222222"
+W_MEME = "WAcc3333333333333333333333333333333333333333"
+POOL_A = "PAcc1111111111111111111111111111111111111111"
+POOL_B = "PAcc2222222222222222222222222222222222222222"
+
+
+def _routed_buy(mid_in: int, mid_out: int) -> dict[str, Any]:
+    """Compra USDC → MEME2 (intermedio) → MEME en la que MEME2 pasa por la wallet."""
+    return synthetic_tx(
+        accounts=[(W, True), (W_USDC, False), (W_MID, False), (W_MEME, False)],
+        lamports=[(10**9, 10**9 - 5_000), (2_000_000,) * 2, (2_000_000,) * 2, (2_000_000,) * 2],
+        token_balances=[
+            (1, W, USDC_MINT, 10_000_000, 0),
+            (2, W, MEME2, 0, mid_in - mid_out),
+            (3, W, MEME, 0, 5_000_000_000),
+        ],
+        inner=[
+            _transfer(W_USDC, POOL_A, 10_000_000),
+            _transfer(POOL_A, W_MID, mid_in),
+            _transfer(W_MID, POOL_B, mid_out),
+            _transfer(POOL_B, W_MEME, 5_000_000_000),
+        ],
+    )
+
+
+def test_synthetic_small_route_residue_is_ignored():
+    [ev] = classify(_routed_buy(mid_in=1_000_000, mid_out=990_000), {W})  # resto del 1 %
+    assert (ev.kind, ev.confidence, ev.mint) == (EventKind.BUY, Confidence.HIGH, MEME)
+    assert ev.quote_delta == Decimal("-10")
+
+
+def test_synthetic_large_route_residue_stays_ambiguous():
+    [ev] = classify(_routed_buy(mid_in=1_000_000, mid_out=900_000), {W})  # resto del 10 %
+    assert ev.kind is EventKind.AMBIGUOUS
 
 
 @pytest.mark.parametrize(

@@ -98,7 +98,10 @@ def test_helius_key_builds_endpoints_and_stays_hidden(monkeypatch):
     assert "clave-de-prueba-123" not in repr(settings)
 
 
-def test_public_rpc_is_the_default():
+def test_public_rpc_is_the_default(monkeypatch):
+    # Aislado del entorno: en el servidor (y en el entorno de desarrollo) puede haber
+    # una clave de Helius definida.
+    monkeypatch.delenv("COPYBOT_HELIUS_API_KEY", raising=False)
     http, ws = Settings(_env_file=None).rpc_endpoints()
     assert http == "https://api.mainnet-beta.solana.com"
     assert ws == "wss://api.mainnet-beta.solana.com"

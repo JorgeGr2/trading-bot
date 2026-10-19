@@ -93,11 +93,37 @@ Las ventas siguen el mismo proceso. Sin ruta de venta, la posición se marca **i
 
 ## 3. Pruebas ejecutadas
 
-<!-- PRUEBAS -->
+```
+$ uv run pytest
+261 passed
+
+$ uv run ruff check src tests scripts migrations
+All checks passed!
+```
+
+Los tests que usan base de datos se ejecutan contra PostgreSQL 16 real. Los del motor usan un mercado de mentira con precios controlados, para poder comprobar cada cifra.
+
+| Criterio de la Fase 1 | Tests |
+|---|---|
+| **PnL y costes** | Una compra con todos los costes calculados a mano (comisión de red y prioritaria, renta, impacto, MEV) y el efectivo que queda. Venta proporcional y cierre con la renta devuelta. Resultado realizado exacto. Diario cuadrado incluso con precios de SOL de muchos decimales |
+| **Slippage** | Si el precio se mueve más de un 3 % durante la latencia, la orden falla y paga la comisión. El MEV cuenta para ese límite. Si Jupiter no responde en t3, también falla y paga |
+| **Tamaño de posición** | Los 10 $ incluyen comisión y renta. Redondeo hacia abajo |
+| **Stops** | Stop-loss al 50 %, venta a las 48 h. El stop-loss sigue vigilando aunque haya fallado una venta parcial copiada |
+| **Caída máxima y pérdida diaria (pausa automática)** | Al caer más de un 25 %, `HALTED_RISK`: la cartera deja de comprar y el libro de señales sigue. Ni forzar `RUNNING`, ni `stop` + `run`, ni reiniciar se lo saltan |
+| **Datos insuficientes o incoherentes** | Señal vieja o recuperada sin hora de bloque, token ilegible, sin precio de SOL (o de hace más de 10 min), Jupiter caído o con respuestas raras: se rechaza con su motivo |
+| **Saldos no negativos** | La base de datos rechaza un efectivo negativo (restricción `CHECK`) |
+| **Sin ventas superiores a la posición** | Pedir vender 10 veces lo que hay solo vende lo que hay y cierra |
+| ***Kill* a mitad de una orden** | El proceso muere durante la latencia con las dos órdenes en curso. Al reiniciar se dan por no ejecutadas, se libera la reserva y la señal no se vuelve a decidir: una orden por libro, sin duplicados |
+| Idempotencia y concurrencia | Repetir una decisión no crea otra orden. 8 señales a la vez respetan las 5 posiciones. Un solo motor a la vez |
+| Filtros de seguridad | 3 tokens reales (fixtures de la cuenta on-chain) y cada extensión peligrosa. Comisión del 0 % que el creador puede subir. Hook sin programa con autoridad |
+| Estados | Pausa (sin entradas, con salidas), solo lectura sin latidos o con el WebSocket caído (y vuelta), token invendible valorado a 0 y reintentado |
+| Integración con Jupiter | Respuestas reales grabadas el 19-oct (cotización de ida y vuelta de Kimchi, precio y liquidez) |
+| Configuración | Límites y parámetros desde `.env`. Una errata en el nombre es un error. Desde `.env` tampoco se pueden relajar los topes |
+| Informe | Copia realista frente a teórica sobre las mismas posiciones, aviso de muestra insuficiente |
 
 ## 4. Revisión adversarial del código
 
-Antes de cerrar la fase pedí una revisión independiente con varios agentes. Cada uno revisó una dimensión: contabilidad, concurrencia y reinicios, realismo de la simulación, y límites de riesgo con la garantía de solo simulación. Después, otro agente intentó **refutar** cada hallazgo leyendo el código. Se confirmaron **<!-- N_REAL -->** y se corrigieron todos los que afectaban al resultado. Los más importantes:
+Antes de cerrar la fase pedí una revisión independiente con varios agentes. Cada uno revisó una dimensión: contabilidad, concurrencia y reinicios, realismo de la simulación, y límites de riesgo con la garantía de solo simulación. Después, otro agente intentó **refutar** cada hallazgo leyendo el código. Se confirmaron **34** (2 de gravedad alta, 13 media y 19 baja) y se refutaron 3. Se corrigieron todos los que afectaban al resultado. Los más importantes:
 
 | Gravedad | Problema | Corrección (con test) |
 |---|---|---|

@@ -266,3 +266,43 @@ async def test_sell_sends_amount_net_of_transfer_fee():
     assert r.ok and r.token_amount == D(500)
     assert quotes.asked[0] == (MEME, USDC_MINT, to_raw(D(495), 6))  # 500 − 1 %
     assert r.usd_amount == D("5.97")  # 6 $ − 0,5 % de MEV
+
+
+# --- Respuestas reales de Jupiter grabadas (19-oct-2026, token Kimchi) ------------------
+
+JUP = Path(__file__).parent / "fixtures" / "jupiter"
+KIMCHI = "Am8iBffqgaedfdK5XhtorbcRrKzwH9nyL3ySikQfpump"
+
+
+@respx.mock
+async def test_real_jupiter_round_trip_passes_market_filters():
+    buy = json.loads((JUP / "quote_usdc_kimchi.json").read_text())
+    sell = json.loads((JUP / "quote_kimchi_usdc.json").read_text())
+    respx.get(JUPITER_QUOTE_URL).mock(
+        side_effect=[httpx.Response(200, json=buy), httpx.Response(200, json=sell)]
+    )
+    client = JupiterQuotes(rate_per_second=1000, sleep=Sleeper(), clock=lambda: NOW)
+    t2 = await client.quote(USDC_MINT, KIMCHI, 9_600_000, 300)
+    back = await client.quote(KIMCHI, USDC_MINT, t2.out_raw, 300)
+    await client.aclose()
+    assert t2.route == ("GoonFi V2", "Pump.fun Amm") and t2.out_raw == 2_238_905_755
+    assert back.out_raw == 9_474_510
+    loss = (1 - D(back.out_raw) / D(t2.in_raw)) * 100  # 1,31 % de ida y vuelta
+    check = MarketCheck(D(124_929), t2.price_impact_pct, loss)
+    assert market_rejections(check, SafetyParams()) == []
+    assert D("1.3") < loss < D("1.4")
+
+
+@respx.mock
+async def test_real_jupiter_price_gives_sol_price_and_liquidity():
+    from copybot.ingest.prices import JUPITER_PRICE_URL, JupiterPrices
+    from copybot.sim.market import LiveMarket
+    from copybot.solana.constants import WSOL_MINT
+
+    data = json.loads((JUP / "price_kimchi_sol.json").read_text())
+    respx.get(JUPITER_PRICE_URL).mock(return_value=httpx.Response(200, json=data))
+    prices = JupiterPrices(sleep=Sleeper())
+    market = LiveMarket(prices, rpc=None)  # type: ignore[arg-type]
+    assert await market.sol_usd() == D(str(data[WSOL_MINT]["usdPrice"]))
+    assert int(await market.liquidity_usd(KIMCHI)) == 124_929
+    await prices.aclose()

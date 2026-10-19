@@ -55,6 +55,7 @@ ZERO = Decimal(0)
 BOOKS = (PORTFOLIO, SIGNALS)
 ENTRY_STATES = {PORTFOLIO: frozenset({"RUNNING"}), SIGNALS: frozenset({"RUNNING", "HALTED_RISK"})}
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+SOL_PRICE_MAX_AGE_S = 600
 
 
 class Market(Protocol):
@@ -450,7 +451,8 @@ class Engine:
                 price = None
             if price is not None and price > 0:
                 self._sol = (now, price)
-        if self._sol is None:
+        # Un precio de SOL de hace más de 10 minutos ya no sirve para calcular comisiones.
+        if self._sol is None or (now - self._sol[0]).total_seconds() > SOL_PRICE_MAX_AGE_S:
             return None
         return CostModel(
             sol_usd=self._sol[1],

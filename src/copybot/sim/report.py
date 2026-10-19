@@ -31,6 +31,7 @@ from copybot.db.models import (
     RiskEvent,
     ServiceHeartbeat,
     Signal,
+    SimFill,
     SimOrder,
     SimPosition,
 )
@@ -61,6 +62,9 @@ class BookResult:
     open_positions: int = 0
     closed_positions: int = 0
     wins: int = 0
+    gross_win_usd: Decimal = ZERO
+    gross_loss_usd: Decimal = ZERO
+    network_fees_usd: Decimal = ZERO  # comisiones de red de compras, ventas y fallidas
     realized_usd: Decimal = ZERO
     unrealized_usd: Decimal = ZERO
     fees_usd: Decimal = ZERO
@@ -70,6 +74,18 @@ class BookResult:
     @property
     def total_usd(self) -> Decimal:
         return self.realized_usd + self.unrealized_usd
+
+    @property
+    def profit_factor(self) -> Decimal | None:
+        return None if self.gross_loss_usd == 0 else self.gross_win_usd / -self.gross_loss_usd
+
+    @property
+    def sample_warning(self) -> str:
+        if self.closed_positions < 30:
+            return "MUESTRA INSUFICIENTE (menos de 30 operaciones cerradas): no sirve para concluir"
+        if self.closed_positions < 100:
+            return "muestra pequeña (menos de 100 operaciones cerradas): conclusiones débiles"
+        return ""
 
 
 @dataclass
@@ -134,6 +150,24 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
                 )
             ).all()
         )
+        fill_fees = dict(
+            (
+                await s.execute(
+                    select(SimOrder.book, func.sum(SimFill.fees_usd))
+                    .join(SimFill, SimFill.order_id == SimOrder.id)
+                    .group_by(SimOrder.book)
+                )
+            ).all()
+        )
+        failed_fees = dict(
+            (
+                await s.execute(
+                    select(LedgerEntry.book, func.sum(LedgerEntry.delta_usd))
+                    .where(LedgerEntry.account == "fees", LedgerEntry.memo == "orden fallida")
+                    .group_by(LedgerEntry.book)
+                )
+            ).all()
+        )
         first = await s.scalar(
             select(PortfolioSnapshot)
             .where(PortfolioSnapshot.book == PORTFOLIO)
@@ -168,6 +202,10 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
                 r.exits_filled += 1
     for book, value in fees.items():
         books[book].fees_usd = Decimal(value or 0)
+    for book, value in fill_fees.items():
+        books[book].network_fees_usd = Decimal(value or 0)
+    for book, value in failed_fees.items():
+        books[book].network_fees_usd += Decimal(value or 0)
 
     open_rows = []
     closed_signals = []
@@ -194,6 +232,9 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
             r.closed_positions += 1
             if p.realized_pnl_usd > 0:
                 r.wins += 1
+                r.gross_win_usd += p.realized_pnl_usd
+            else:
+                r.gross_loss_usd += p.realized_pnl_usd
             if p.book == SIGNALS:
                 closed_signals.append(p)
 
@@ -217,7 +258,14 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
     )
 
     per_trader: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"copias": 0, "cerradas": 0, "resultado": ZERO, "abiertas": 0}
+        lambda: {
+            "copias": 0,
+            "cerradas": 0,
+            "resultado": ZERO,
+            "abiertas": 0,
+            "real_cerradas": ZERO,
+            "teorica_cerradas": None,
+        }
     )
     for p in positions:
         if p.book != SIGNALS:
@@ -229,6 +277,11 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
             t["resultado"] += _position_value(p) - p.cost_usd - p.rent_usd
         else:
             t["cerradas"] += 1
+            t["real_cerradas"] += p.realized_pnl_usd
+            if p.theoretical_amount is not None and entry_cost[p.id] > 0:
+                t["teorica_cerradas"] = (t["teorica_cerradas"] or ZERO) + (
+                    p.theoretical_proceeds_usd - entry_cost[p.id]
+                )
         t["resultado"] += p.realized_pnl_usd
     traders = sorted(
         ({"trader": w} | v for w, v in per_trader.items()), key=lambda x: x["resultado"]
@@ -299,9 +352,19 @@ def render(report: Report, *, full: bool = True) -> str:
         )
         out.append(
             f"  Resultado {_usd(r.total_usd)} (realizado {_usd(r.realized_usd)}, "
-            f"sin realizar {_usd(r.unrealized_usd)}); comisiones de órdenes fallidas y "
-            f"ventas {r.fees_usd:,.2f} $"
+            f"sin realizar {_usd(r.unrealized_usd)})"
         )
+        pf = "—" if r.profit_factor is None else f"{r.profit_factor:.2f}"
+        per_trade = (
+            f"{r.network_fees_usd / r.closed_positions:,.3f} $" if r.closed_positions else "—"
+        )
+        out.append(
+            f"  Profit factor {pf}; comisiones de red {r.network_fees_usd:,.2f} $ "
+            f"({per_trade} por operación cerrada; sin contar MEV ni impacto, que van en el "
+            "precio)"
+        )
+        if r.sample_warning:
+            out.append(f"  AVISO: {r.sample_warning}")
         if full:
             for label, counter in (("Rechazadas", r.rejected), ("Fallidas", r.failed)):
                 if counter:
@@ -332,6 +395,12 @@ def render(report: Report, *, full: bool = True) -> str:
             out.append(
                 f"  {_short(t['trader'])}: {t['copias']} copias ({t['cerradas']} cerradas, "
                 f"{t['abiertas']} abiertas), {_usd(t['resultado'])}"
+                + (
+                    f"; cerradas: real {_usd(t['real_cerradas'])} frente a teórica "
+                    f"{_usd(t['teorica_cerradas'])}"
+                    if t["teorica_cerradas"] is not None
+                    else ""
+                )
             )
     if full and report.risk_events:
         out.append("\nÚltimos eventos de riesgo")

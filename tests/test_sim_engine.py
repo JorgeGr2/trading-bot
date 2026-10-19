@@ -501,3 +501,62 @@ async def test_kill_during_execution_then_restart_without_duplicates(world):
     cash = await world.cash()
     assert (cash.cash_usd, cash.reserved_usd) == (100, 0)
     assert await world.ledger_is_balanced()
+
+
+async def test_insufficient_data_is_rejected_with_reason(world):
+    unknown = mint(1)  # sin cuenta del token
+    world.quotes.price[unknown] = Decimal("0.01")
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", unknown, "50000", "500")
+    await eng.tick()
+    (o,) = await world.orders(book=PORTFOLIO)
+    assert o.status == "rejected" and "no se pudo leer la cuenta del token" in o.status_reason
+
+    world.market.sol = None  # sin precio de SOL no se pueden calcular las comisiones
+    world.clock.advance(seconds=601)  # el último precio conocido ha caducado
+    await world.heartbeat()
+    m = world.token(2)
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    o = (await world.orders(book=PORTFOLIO, mint=m))[0]
+    assert o.status == "rejected" and "precio de SOL" in o.status_reason
+
+    world.market.sol = Decimal(200)
+    m3 = world.token(3)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("Jupiter caído")
+
+    world.quotes.quote = broken  # type: ignore[method-assign]
+    await world.trade("buy", m3, "50000", "500")
+    await eng.tick()
+    o = (await world.orders(book=PORTFOLIO, mint=m3))[0]
+    assert o.status == "rejected" and "no hay datos de mercado" in o.status_reason
+    assert (await world.cash()).cash_usd == 100
+
+
+async def test_report_compares_realistic_and_theoretical_copy(world):
+    from copybot.sim.report import build_report, render
+
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    world.quotes.price[m] = Decimal("0.02")
+    await world.trade("sell", m, "50000", "1000")
+    await eng.tick()
+
+    report = await build_report(world.sessions, world.clock())
+    signals = report.books[SIGNALS]
+    (pos,) = await world.positions(SIGNALS)
+    assert signals.closed_positions == 1 and signals.wins == 1
+    assert signals.realized_usd == pos.realized_pnl_usd
+    # Teórica: 10 $ a 0,01 y venta a 0,02 → +10 $. La realista pierde por costes.
+    assert report.comparison.theoretical_usd == 10
+    assert Decimal(9) < report.comparison.realistic_usd < 10
+    assert "MUESTRA INSUFICIENTE" in signals.sample_warning
+    text = render(report)
+    assert "Copia teórica:   +10.00 $" in text and "Estado: RUNNING" in text
+    assert report.equity_usd == 100 + report.books[PORTFOLIO].realized_usd

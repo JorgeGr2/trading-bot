@@ -146,11 +146,69 @@ Lo que queda abierto está en el apartado 8.
 
 ## 6. Leaderboard de FOMO y Kimchi
 
-<!-- LEADERBOARD -->
+### 6.1 De dónde salen las wallets
+
+Con tu permiso para usar páginas de terceros:
+
+- **fomoapi.io**: su top 100 histórico de FOMO (99 con wallet de Solana) y **293 fichas públicas de traders** con su wallet, PnL, operaciones y posiciones principales. Las fichas se descargaron una vez, a una petición por segundo. En total, **308 wallets distintas**.
+- **fomolens.app** permite buscar la wallet de un usuario por su nombre (hasta 50 búsquedas al día). No ha hecho falta.
+- **Los clanes** que me enviaste no se pueden leer: la página solo funciona con la sesión de FOMO iniciada y su API (`prod-api.fomo.family`) no está entre los dominios permitidos. No voy a usar tu sesión. Si me mandas capturas de la lista de miembros, saco sus wallets.
+
+Comprobación: las wallets de estas fichas son las que firman como trader en las transacciones del relayer de FOMO. Tres del top 100 ya aparecían en nuestro muestreo de la Fase 3.
+
+### 6.2 Resultado del análisis (30 días, a 19-oct 18:36 UTC)
+
+| Origen | Traders | Puntuables | Con ventaja tras el coste de copiar | Rentabilidad mediana por operación (prudente) | % en positivo | Resultado conjunto |
+|---|---|---|---|---|---|---|
+| Leaderboard (fomoapi.io) | 308 | 57 | **4** | −14,2 % | 12,3 % | −161.826 $ sobre 22,2 M$ comprados |
+| Relayer (Fase 3) | 220 | 173 | **1** | −13,8 % | 2,9 % | −289.720 $ sobre 3,1 M$ |
+
+- **La leaderboard tampoco gana como grupo en nuestro periodo.** El PnL «de todos los tiempos» que muestra FOMO viene sobre todo de meses anteriores y de posiciones aún sin vender. En los últimos 30 días, operación a operación, la mediana pierde un 14 %.
+- **251 no se pueden puntuar:**
+  - 154 cierran menos de 20 operaciones en USD en 30 días (muchos operan en las cadenas EVM de FOMO, que no vemos, o mantienen posiciones largas);
+  - 89 operan tanto que su historial supera el máximo de 10.000 transacciones;
+  - 7 tienen datos incompletos;
+  - 1 vende demasiado rápido para copiarle.
+- **Coste:** 169.680 créditos de Helius para importar y poner al día 307 historiales (estimación con la tarifa contrastada en la Fase 3).
+
+### 6.3 Los cinco con ventaja
+
+| # | Trader | Puntos | Operaciones | Acierto | Rentabilidad mediana | Media prudente | Primera venta (mediana) | Resultado 30 días |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `A9aqAHUX…` (relayer, Fase 3) | 77,2 | 33 | 70 % | +11,9 % | +23,7 % | 4,3 min | +61 $ (opera muy poco dinero) |
+| 2 | **@nekomayu** `CZ7gnaUz…` | 70,2 | 145 | 74 % | +29,9 % | +54,5 % | 4,9 min | +38.549 $ |
+| 3 | **@OinkersRUs** `DPAN2Vig…` | 62,9 | 118 | 80 % | +29,4 % | +40,8 % | 1,8 min | +30.388 $ |
+| 4 | @kecoseh `sbsTwovW…` | 34,1 | 37 | 54 % | +4,1 % | +17,0 % | 12,9 min | +44.647 $ |
+| 5 | @Washedupke3d `9pGcr4S4…` | 32,7 | 37 | 43 % | −4,8 % | +21,8 % | 14,0 min | +134.085 $ (79 operaciones en SOL fuera del cálculo) |
+
+Con reservas:
+
+- **A9aqAHUX sigue bien un día después** (de 55 a 77 puntos), pero opera muy poco dinero y una sola operación aporta el 63 % de lo ganado.
+- **@nekomayu y @OinkersRUs** ganan mucho y muy deprisa: en 2-5 minutos, con aciertos del 74-80 %. En FOMO eso encaja con un patrón conocido: el trader compra, sus seguidores lo copian y suben el precio, y él vende sobre esas compras. **Quien copia con retraso compra más caro y sirve de salida.** Es justo lo que mide el simulador (copia realista frente a teórica), y por eso están en la lista de la prueba en vivo.
+- Con 230 candidatos puntuables, que unos pocos salgan bien puede ser azar. **Solo cuenta si siguen siendo buenos en las próximas semanas, copiados de verdad** (Fase 8).
+
+### 6.4 Kimchi
+
+El enlace que me pasaste es la moneda **«Aura Final Boss» ($Kimchi)**, `Am8iBffq…pump`: creada en pump.fun el 27-jul-2026, con 4,1 M$ de capitalización, 124.000 $ de liquidez y 5.464 holders. Es decir, **es un token, no un trader**.
+
+- **Quién gana con ella.** Siete fichas de la leaderboard la tienen entre sus posiciones principales, con ganancias sin realizar de +11.000 a +44.000 $: @oznek, @elle, @GeofferiChalmers, @bizzxbt, @macdegods, @OmakaseOnly y @pennylane. **Los que más ganan la compraron hace tiempo y la mantienen.** Por ejemplo, @oznek no la ha comprado en los últimos 23 días. Ese movimiento ya pasó y no se puede copiar ahora.
+- **Quién la ha operado hace poco.** Entre el 15 y el 18 de octubre, 15 de las wallets importadas la compraron, algunas con 10.000-25.000 $. **Las que ya vendieron perdieron dinero**:
+  - @rasmr: 25.000 $ → 21.700 $;
+  - @macdegods: 11.500 $ → 9.575 $ (le queda una parte);
+  - @nekomayu: 15.000 $ → 4.795 $.
+
+  Otras siguen dentro, como @OmakaseOnly con 21.000 $.
+- **¿Se podría copiar hoy?** Su mercado pasa nuestros filtros: con la cotización real grabada como fixture, comprar y vender 9,60 $ cuesta un 1,3 %. Así que, si un trader seguido la compra, el simulador la copiaría. Los traders que la tienen están en la lista de la prueba en vivo.
 
 ## 7. Coste
 
-<!-- COSTE -->
+| Concepto | Créditos de Helius |
+|---|---|
+| Importar y poner al día 307 historiales de la leaderboard (más la puesta al día de los 221 de la Fase 3) | ≈ 174.500 |
+| Prueba en vivo (monitor, cuentas de tokens) | ≈ 200 por hora con 15-19 wallets |
+| **Este mes en total** (real del panel hasta el 18-oct + estimación de hoy) | **≈ 260.000 de 1.000.000** |
+
+Jupiter (cotizaciones y precios) y fomoapi.io no han costado nada. Si la simulación corriera todo el mes con unas 20 wallets, el monitor gastaría unos 150.000 créditos: cabe en el plan gratuito.
 
 ## 8. Limitaciones y problemas abiertos
 

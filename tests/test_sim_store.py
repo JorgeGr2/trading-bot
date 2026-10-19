@@ -391,3 +391,65 @@ async def test_database_rejects_negative_cash(store, engine):
         row.cash_usd = Decimal(-1)
         with pytest.raises(IntegrityError):
             await s.flush()
+
+
+def test_sell_fraction_from_the_transaction_balances():
+    from copybot.sim.store import fraction_from_payload
+
+    def bal(owner, amount):
+        return {"owner": owner, "mint": mint(1), "uiTokenAmount": {"amount": str(amount)}}
+
+    payload = {
+        "meta": {
+            "preTokenBalances": [bal(TRADER, 1000), bal(OTHER, 5)],
+            "postTokenBalances": [bal(TRADER, 250), bal(OTHER, 5)],
+        }
+    }
+    assert fraction_from_payload(payload, TRADER, mint(1)) == Decimal("0.75")
+    assert fraction_from_payload(payload, TRADER, mint(2)) is None
+    assert fraction_from_payload(None, TRADER, mint(1)) is None
+
+
+async def test_ledger_balances_with_awkward_decimals(store, engine):
+    """Precios de SOL con muchos decimales (como los de Jupiter): el diario sigue cuadrando
+    al guardarse con 18 decimales, en ventas parciales y totales."""
+    sig = await signal(store, engine)
+    order = await entry(store, sig)
+    sol = Decimal("147.8079789639263")
+    fee = Decimal(105_000) / Decimal(10**9) * sol
+    rent = Decimal(1_488_440) / Decimal(10**9) * sol
+    ex = Execution(
+        True,
+        token_amount=Decimal("32330.312208") * Decimal("0.995"),
+        usd_amount=Decimal(10) - fee - rent,
+        fees_usd=fee,
+    )
+    pos_id = await store.fill_entry(
+        order.order_id,
+        ex,
+        rent_lamports=1_488_440,
+        rent_usd=rent,
+        theoretical_price=Decimal("0.0003"),
+        theoretical_tokens=Decimal(10) / Decimal("0.0003"),
+    )
+    async with make_sessionmaker(engine)() as s:
+        held = (await s.get(SimPosition, pos_id)).amount
+    for n, part in enumerate([held / 3, held]):
+        oid = await store.open_exit(
+            position_id=pos_id,
+            key=f"x{n}",
+            amount=part,
+            purpose="copy_exit",
+            signal_id=None,
+            decision={},
+        )
+        await store.fill_exit(
+            oid,
+            sell_ex(str(part), str(Decimal("14.4814330") / 3)),
+            rent_refund_usd=Decimal(1_488_440) / Decimal(10**9) * sol,
+            theoretical_price=Decimal("0.0004"),
+        )
+    async with make_sessionmaker(engine)() as s:
+        pos = await s.get(SimPosition, pos_id)
+    assert pos.status == "closed" and pos.amount == 0
+    await assert_books_balance(engine)

@@ -100,14 +100,16 @@ def mint_rejections(info: MintInfo | None, params: SafetyParams) -> list[str]:
     if fee > params.max_transfer_fee_bps:
         limit = params.max_transfer_fee_bps / 100
         reasons.append(f"comisión de transferencia del {fee / 100:.2f} % (máximo {limit:.2f} %)")
-    elif fee and info.transfer_fee_mutable and params.reject_mutable_transfer_fee:
+    elif info.transfer_fee_mutable and params.reject_mutable_transfer_fee:
+        # También con comisión 0: el creador podría subirla después.
         reasons.append("el creador puede subir la comisión de transferencia")
     return reasons
 
 
 def _extension_active(name: str, state: Any) -> bool:
     if name == "transferHook":
-        return bool((state or {}).get("programId"))
+        # Sin programa pero con autoridad: el creador puede activarlo más tarde.
+        return bool((state or {}).get("programId") or (state or {}).get("authority"))
     if name == "permanentDelegate":
         return bool((state or {}).get("delegate"))
     return True

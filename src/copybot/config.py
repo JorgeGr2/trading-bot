@@ -9,10 +9,14 @@ funcionar con un riesgo mayor del permitido.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 # --- Topes duros ---------------------------------------------------------------
 # Cambiar cualquiera de estos valores exige modificar el código y pasar revisión.
@@ -26,10 +30,55 @@ MAX_DRAWDOWN_PCT = Decimal("25")
 MAX_MONTHLY_BUDGET_USD = Decimal("50")
 
 
-class RiskLimits(BaseSettings):
+class _OwnPrefixDotEnv(PydanticBaseSettingsSource):
+    """Lee de ``.env`` solo las claves con el prefijo del grupo. Las del prefijo que no
+    existen (p. ej. una errata) son un error; las de otros grupos se ignoran."""
+
+    def __init__(self, settings_cls: type[BaseSettings], inner: PydanticBaseSettingsSource):
+        super().__init__(settings_cls)
+        self._inner = inner
+        self._prefix = str(settings_cls.model_config.get("env_prefix", "")).lower()
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        fields = self.settings_cls.model_fields
+        data = {}
+        for key, value in self._inner().items():
+            if key in fields:
+                data[key] = value
+            elif key.lower().startswith(self._prefix):
+                raise ValueError(f"variable desconocida en .env: {key.upper()}")
+        return data
+
+
+class GroupSettings(BaseSettings):
+    """Grupo de opciones con prefijo propio que también se lee de ``.env``."""
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            _OwnPrefixDotEnv(settings_cls, dotenv_settings),
+            file_secret_settings,
+        )
+
+
+class RiskLimits(GroupSettings):
     """Límites de riesgo. Solo pueden endurecerse respecto a los topes."""
 
-    model_config = SettingsConfigDict(env_prefix="COPYBOT_RISK_", extra="forbid")
+    model_config = SettingsConfigDict(
+        env_prefix="COPYBOT_RISK_", env_file=".env", env_file_encoding="utf-8", extra="forbid"
+    )
 
     virtual_capital_usd: Decimal = MAX_VIRTUAL_CAPITAL_USD
     max_position_usd: Decimal = MAX_POSITION_USD

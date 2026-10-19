@@ -8,7 +8,10 @@ Garantías (todas en la base de datos, no solo en el código):
   reservar el efectivo ocurren en la misma transacción, con la caja bloqueada.
 * **Sin saldos negativos ni ventas de más.** Restricciones ``CHECK`` sobre la caja y
   las posiciones; una venta nunca supera lo que hay en la posición.
-* **Doble entrada.** Los apuntes del diario de cada operación suman cero.
+* **Doble entrada.** Los apuntes del diario de cada operación suman cero. Todos los
+  importes se redondean a 18 decimales (la escala de las columnas) antes de apuntarlos,
+  así que lo que se comprueba es exactamente lo que se guarda.
+* **Un solo motor a la vez** (``exclusive_run``, bloqueo de PostgreSQL).
 
 Cuentas del diario (en USD): ``cash`` y ``reserved`` (efectivo), ``position`` (coste de
 lo que se tiene: lo pagado, la comisión de la compra y la renta de la cuenta de token),
@@ -22,13 +25,14 @@ cero.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,6 +43,7 @@ from copybot.db.models import (
     ControlState,
     LedgerEntry,
     PortfolioSnapshot,
+    RawTransaction,
     RiskEvent,
     ServiceHeartbeat,
     Signal,
@@ -50,11 +55,47 @@ from copybot.db.models import (
 )
 from copybot.db.models import WalletEvent as WalletEventRow
 from copybot.sim.executor import Execution
-from copybot.sim.risk import BookState, entry_rejections
+from copybot.sim.risk import BookState, entry_rejections, halt_reasons
 
 ZERO = Decimal(0)
 PORTFOLIO = "portfolio"
 SIGNALS = "signals"
+# Escala de las columnas de importes (numeric(38, 18)); PostgreSQL redondea así.
+QUANTUM = Decimal("1e-18")
+RUN_LOCK_ID = 74_201_810  # pg_advisory_lock del motor de simulación
+
+
+def q(value: Decimal) -> Decimal:
+    return value.quantize(QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def position_value(p: SimPosition) -> Decimal:
+    """Valor de una posición abierta: lo que daría venderla (con la renta que se
+    recupera al cerrar), su coste si aún no se ha valorado, o 0 si no se puede vender."""
+    if p.unsellable:
+        return ZERO
+    return p.last_value_usd if p.last_value_usd is not None else p.cost_usd + p.rent_usd
+
+
+def fraction_from_payload(payload: dict[str, Any] | None, wallet: str, mint: str) -> Decimal | None:
+    """Fracción de sus tokens que vende el trader, con los saldos de la propia
+    transacción (antes y después). ``None`` si no se puede saber."""
+    meta = (payload or {}).get("meta") or {}
+
+    def total(key: str) -> int | None:
+        rows = meta.get(key)
+        if rows is None:
+            return None
+        return sum(
+            int((r.get("uiTokenAmount") or {}).get("amount") or 0)
+            for r in rows
+            if r.get("owner") == wallet and r.get("mint") == mint
+        )
+
+    pre, post = total("preTokenBalances"), total("postTokenBalances")
+    if pre is None or post is None or pre <= 0:
+        return None
+    return min(Decimal(1), max(ZERO, Decimal(pre - post) / Decimal(pre)))
 
 
 def idempotency_key(*parts: object) -> str:
@@ -141,12 +182,24 @@ class SimStore:
         async with self._sessions.begin() as s:
             return (await s.execute(stmt)).scalar_one_or_none() is not None
 
-    async def monitor_heartbeat_age(self) -> float | None:
+    async def monitor_heartbeat(self) -> tuple[float | None, dict[str, Any]]:
+        """Segundos desde el último latido del monitor y sus detalles."""
         async with self._sessions() as s:
-            beat = await s.scalar(
-                select(ServiceHeartbeat.beat_at).where(ServiceHeartbeat.service == "monitor")
-            )
-        return None if beat is None else (self._clock() - beat).total_seconds()
+            row = await s.get(ServiceHeartbeat, "monitor")
+        if row is None:
+            return None, {}
+        return (self._clock() - row.beat_at).total_seconds(), dict(row.details or {})
+
+    @asynccontextmanager
+    async def exclusive_run(self) -> AsyncIterator[bool]:
+        """Bloqueo para que solo corra un motor a la vez (``False``: ya hay otro)."""
+        async with self._sessions() as s:
+            got = bool(await s.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": RUN_LOCK_ID}))
+            try:
+                yield got
+            finally:
+                if got:
+                    await s.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": RUN_LOCK_ID})
 
     # --- Señales --------------------------------------------------------------------
 
@@ -154,7 +207,8 @@ class SimStore:
         """Crea una señal por cada compraventa nueva (confianza alta) de una wallet seguida.
 
         Solo eventos detectados en vivo o recuperados (no los del historial importado).
-        Para las ventas calcula qué fracción de su posición vende el trader.
+        Para las ventas calcula qué fracción de su posición vende el trader: con los saldos
+        de la propia transacción si están; si no, con su historial guardado.
         """
         e = WalletEventRow
         stmt = (
@@ -177,6 +231,13 @@ class SimStore:
                     continue
                 fraction = None
                 if ev.kind == "sell":
+                    payload = await s.scalar(
+                        select(RawTransaction.payload).where(
+                            RawTransaction.signature == ev.signature
+                        )
+                    )
+                    fraction = fraction_from_payload(payload, ev.wallet, ev.mint)
+                if ev.kind == "sell" and fraction is None:
                     held = await s.scalar(
                         select(func.coalesce(func.sum(e.token_delta), 0)).where(
                             e.wallet == ev.wallet,
@@ -251,12 +312,17 @@ class SimStore:
                 )
                 if cash_row is None or limits is None:
                     raise RuntimeError("cartera no inicializada")
-                reasons = entry_rejections(
-                    await self._book_state(s, cash_row, with_pending=True),
-                    signal.mint,
-                    size,
-                    limits,
-                )
+                book_state = await self._book_state(s, cash_row, with_pending=True)
+                if cash_row.day != now.date():  # empieza un día nuevo (UTC)
+                    cash_row.day = now.date()
+                    cash_row.day_start_equity_usd = q(book_state.equity_usd)
+                    book_state = await self._book_state(s, cash_row, with_pending=True)
+                # Las paradas por pérdida diaria y caída máxima se comprueban aquí también,
+                # en la misma transacción: ningún camino (reanudar, reiniciar) se las salta.
+                reasons = [
+                    f"parada por riesgo: {detail}" for _, detail in halt_reasons(book_state, limits)
+                ]
+                reasons += entry_rejections(book_state, signal.mint, size, limits)
             status = "rejected" if reasons else "pending"
             reserve = size if (book == PORTFOLIO and status == "pending") else ZERO
             order_id = await s.scalar(
@@ -357,19 +423,29 @@ class SimStore:
             )
             if order is None:
                 return None
+            tokens, usd, fees, rent_usd = (
+                q(ex.token_amount),
+                q(ex.usd_amount),
+                q(ex.fees_usd),
+                q(rent_usd),
+            )
+            if theoretical_tokens is not None:
+                theoretical_tokens = q(theoretical_tokens)
+            if theoretical_price is not None:
+                theoretical_price = q(theoretical_price)
+            cost = usd + fees
+            spent = cost + rent_usd
             s.add(
                 SimFill(
                     order_id=order_id,
-                    token_amount=ex.token_amount,
-                    usd_amount=ex.usd_amount,
-                    fees_usd=ex.fees_usd,
-                    price_usd=(ex.usd_amount + ex.fees_usd) / ex.token_amount,
+                    token_amount=tokens,
+                    usd_amount=usd,
+                    fees_usd=fees,
+                    price_usd=q(cost / tokens),
                     detail=ex.detail,
                     filled_at=now,
                 )
             )
-            cost = ex.usd_amount + ex.fees_usd
-            spent = cost + rent_usd
             position = await s.scalar(
                 select(SimPosition)
                 .where(
@@ -386,7 +462,7 @@ class SimStore:
                     mint=order.mint,
                     wallet=order.wallet,
                     status="open",
-                    amount=ex.token_amount,
+                    amount=tokens,
                     cost_usd=cost,
                     invested_usd=spent,
                     proceeds_usd=ZERO,
@@ -403,19 +479,21 @@ class SimStore:
                 )
                 s.add(position)
             else:  # el trader vuelve a comprar el mismo token (solo en el libro de señales)
-                position.amount += ex.token_amount
+                position.amount += tokens
                 position.cost_usd += cost
                 position.invested_usd += spent
                 position.rent_lamports += rent_lamports
                 position.rent_usd += rent_usd
+                if position.last_value_usd is not None:  # lo nuevo, a su coste hasta valorar
+                    position.last_value_usd += spent
                 old, old_price = position.theoretical_amount, position.theoretical_entry_price
                 if None in (old, old_price, theoretical_tokens, theoretical_price):
                     position.theoretical_amount = position.theoretical_entry_price = None
                 else:
                     total = old + theoretical_tokens
-                    position.theoretical_entry_price = (
-                        old * old_price + theoretical_tokens * theoretical_price
-                    ) / total
+                    position.theoretical_entry_price = q(
+                        (old * old_price + theoretical_tokens * theoretical_price) / total
+                    )
                     position.theoretical_amount = total
             await s.flush()
             order.position_id = position.id
@@ -453,6 +531,7 @@ class SimStore:
     async def fail_order(self, order_id: int, reason: str, fee_usd: Decimal) -> bool:
         """Marca la orden como fallida, libera la reserva y cobra la comisión pagada."""
         now = self._clock()
+        fee_usd = q(fee_usd)
         async with self._sessions.begin() as s:
             order = await s.scalar(
                 update(SimOrder)
@@ -582,24 +661,28 @@ class SimStore:
             pos = await s.scalar(
                 select(SimPosition).where(SimPosition.id == order.position_id).with_for_update()
             )
-            sold = min(ex.token_amount, pos.amount)
+            before = pos.amount
+            sold = min(q(ex.token_amount), before)
             if sold <= 0:
                 raise RuntimeError(f"venta sin tokens en la posición {pos.id}")
-            cost_part = pos.cost_usd * sold / pos.amount
+            closing = sold == before
+            cost_part = pos.cost_usd if closing else q(pos.cost_usd * sold / before)
             if pos.theoretical_amount is not None and theoretical_price is not None:
-                theo_sold = pos.theoretical_amount * sold / pos.amount
+                theo_sold = (
+                    pos.theoretical_amount if closing else q(pos.theoretical_amount * sold / before)
+                )
                 pos.theoretical_amount -= theo_sold
-                pos.theoretical_proceeds_usd += theo_sold * theoretical_price
+                pos.theoretical_proceeds_usd += q(theo_sold * theoretical_price)
             else:
                 pos.theoretical_amount = None
-            proceeds, fees = ex.usd_amount, ex.fees_usd
+            proceeds, fees, refund = q(ex.usd_amount), q(ex.fees_usd), q(rent_refund_usd)
             s.add(
                 SimFill(
                     order_id=order_id,
                     token_amount=sold,
                     usd_amount=proceeds,
                     fees_usd=fees,
-                    price_usd=proceeds / sold,
+                    price_usd=q(proceeds / sold),
                     detail=ex.detail,
                     filled_at=now,
                 )
@@ -607,23 +690,28 @@ class SimStore:
             pos.amount -= sold
             pos.cost_usd -= cost_part
             pos.proceeds_usd += proceeds
-            pos.realized_pnl_usd += proceeds - fees - cost_part
             pos.exit_pending = False
             pos.exit_purpose = None
-            entries = {
-                "cash": proceeds - fees,
-                "position": -cost_part,
-                "fees": fees,
-                "pnl": -(proceeds - cost_part),
-            }
-            if pos.amount == 0:
+            cash_in = proceeds - fees
+            position_out = cost_part
+            if closing:
                 pos.status = "closed"
                 pos.closed_at = now
-                pos.cost_usd = ZERO
-                pos.realized_pnl_usd += rent_refund_usd - pos.rent_usd
-                entries["cash"] += rent_refund_usd
-                entries["position"] -= pos.rent_usd
-                entries["pnl"] -= rent_refund_usd - pos.rent_usd
+                cash_in += refund
+                position_out += pos.rent_usd
+            elif pos.last_value_usd is not None:
+                # Lo vendido ya no está en la posición: su valor baja en proporción (la
+                # renta se recupera entera al final).
+                tokens_value = max(pos.last_value_usd - refund, ZERO)
+                pos.last_value_usd = refund + q(tokens_value * pos.amount / before)
+            pnl = cash_in - position_out  # resultado de esta venta (comisión incluida)
+            pos.realized_pnl_usd += pnl
+            entries = {
+                "cash": cash_in,
+                "position": -position_out,
+                "fees": fees,
+                "pnl": -(pnl + fees),
+            }
             if pos.book == PORTFOLIO:
                 cash = await s.scalar(
                     select(BookCash).where(BookCash.book == PORTFOLIO).with_for_update()
@@ -675,6 +763,25 @@ class SimStore:
                 .limit(1)
             )
 
+    async def consecutive_exit_failures(self, position_id: int) -> int:
+        """Ventas fallidas seguidas desde la última que salió bien."""
+        async with self._sessions() as s:
+            last_ok = await s.scalar(
+                select(func.max(SimOrder.id)).where(
+                    SimOrder.position_id == position_id,
+                    SimOrder.side == "sell",
+                    SimOrder.status == "filled",
+                )
+            )
+            stmt = select(func.count()).where(
+                SimOrder.position_id == position_id,
+                SimOrder.side == "sell",
+                SimOrder.status == "failed",
+            )
+            if last_ok is not None:
+                stmt = stmt.where(SimOrder.id > last_ok)
+            return int(await s.scalar(stmt) or 0)
+
     async def has_pending_order(self, position_id: int) -> bool:
         async with self._sessions() as s:
             return bool(
@@ -695,7 +802,12 @@ class SimStore:
                 SimPosition.status == "open",
                 (SimPosition.last_valued_at.is_(None)) | (SimPosition.last_valued_at < before),
             )
-            .order_by(SimPosition.last_valued_at.asc().nulls_first(), SimPosition.id)
+            .order_by(
+                # Primero la cartera: su riesgo no puede esperar a las del libro de señales.
+                case((SimPosition.book == PORTFOLIO, 0), else_=1),
+                SimPosition.last_valued_at.asc().nulls_first(),
+                SimPosition.id,
+            )
             .limit(limit)
         )
         async with self._sessions() as s:
@@ -728,15 +840,7 @@ class SimStore:
                 )
             )
         )
-        value = sum(
-            (
-                ZERO
-                if p.unsellable
-                else (p.last_value_usd if p.last_value_usd is not None else p.cost_usd)
-                for p in positions
-            ),
-            ZERO,
-        )
+        value = sum((position_value(p) for p in positions), ZERO)
         mints = [p.mint for p in positions]
         if with_pending:
             mints += list(
@@ -829,8 +933,8 @@ class SimStore:
         **entries: Decimal,
     ) -> None:
         total = sum(entries.values(), ZERO)
-        if total != 0:
-            raise AssertionError(f"apuntes descuadrados ({memo}): {entries}")
+        if total != 0 or any(q(v) != v for v in entries.values()):
+            raise AssertionError(f"apuntes descuadrados o sin redondear ({memo}): {entries}")
         for account, delta in entries.items():
             if delta:
                 s.add(

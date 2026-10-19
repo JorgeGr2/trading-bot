@@ -105,3 +105,29 @@ def test_public_rpc_is_the_default(monkeypatch):
     http, ws = Settings(_env_file=None).rpc_endpoints()
     assert http == "https://api.mainnet-beta.solana.com"
     assert ws == "wss://api.mainnet-beta.solana.com"
+
+
+def test_group_settings_are_read_from_dotenv(tmp_path, monkeypatch):
+    from copybot.sim.params import EngineParams, SafetyParams
+
+    for name in ("COPYBOT_RISK_MAX_OPEN_POSITIONS", "COPYBOT_SIM_LATENCY_MS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "COPYBOT_MODE=simulation\n"
+        "COPYBOT_RISK_MAX_OPEN_POSITIONS=2\n"
+        "COPYBOT_SAFETY_MIN_LIQUIDITY_USD=50000\n"
+        "COPYBOT_SIM_LATENCY_MS=2500\n"
+    )
+    assert RiskLimits().max_open_positions == 2
+    assert SafetyParams().min_liquidity_usd == 50_000
+    assert EngineParams().latency_ms == 2500
+    # Una errata en el nombre no se ignora en silencio.
+    with (tmp_path / ".env").open("a") as fh:
+        fh.write("COPYBOT_RISK_MAX_OPEN_POSITONS=1\n")
+    with pytest.raises(ValueError, match="MAX_OPEN_POSITONS"):
+        RiskLimits()
+    # Y lo del .env tampoco puede relajar los topes.
+    (tmp_path / ".env").write_text("COPYBOT_RISK_MAX_OPEN_POSITIONS=9\n")
+    with pytest.raises(ValidationError):
+        RiskLimits()

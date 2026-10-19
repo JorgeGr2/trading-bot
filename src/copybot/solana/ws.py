@@ -58,6 +58,8 @@ class LogsSubscriber:
         self._backoff_max = backoff_max_seconds
         self._idle_timeout = idle_timeout_seconds
         self._clock = clock
+        # ¿Está suscrito ahora mismo? (lo publica el latido del monitor)
+        self.connected = False
 
     async def stream(self) -> AsyncIterator[LiveItem]:
         attempt = 0
@@ -67,12 +69,15 @@ class LogsSubscriber:
                     self._url, max_size=2**22, open_timeout=20, ping_interval=20
                 ) as ws:
                     subs = await self._subscribe(ws)
+                    self.connected = True
                     yield Reconnected(attempt)
                     attempt = 0
                     async for item in self._read(ws, subs):
                         yield item
             except (OSError, TimeoutError, websockets.WebSocketException) as exc:
                 log.warning("ws_disconnected", error=type(exc).__name__, attempt=attempt)
+            finally:
+                self.connected = False
             delay = min(self._backoff_max, self._backoff_base * 2**attempt)
             attempt += 1
             await asyncio.sleep(delay * (0.5 + random.random() / 2))  # noqa: S311

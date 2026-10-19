@@ -78,13 +78,14 @@ async def _control(action: str, store: SimStore) -> int:
     elif action == "stop":
         ok = await store.set_state("STOPPED", "parada manual", "cli")
     else:
-        if current == "HALTED_RISK":
-            reasons = halt_reasons(await store.book_state(PORTFOLIO), RiskLimits())
-            if reasons:
-                print("No se reanuda: los límites de riesgo siguen superados.")
-                for _, detail in reasons:
-                    print(f"  - {detail}")
-                return 1
+        # Sea cual sea el estado (también desde una pausa), no se reanuda con los
+        # límites de pérdida superados.
+        reasons = halt_reasons(await store.book_state(PORTFOLIO), RiskLimits())
+        if reasons:
+            print("No se reanuda: los límites de riesgo siguen superados.")
+            for _, detail in reasons:
+                print(f"  - {detail}")
+            return 1
         ok = await store.set_state(
             "RUNNING", "reanudación manual", "cli", only_from=["PAUSED", "HALTED_RISK"]
         )
@@ -113,8 +114,10 @@ async def _run(args: argparse.Namespace, settings: Settings, sessions, store: Si
         params=params,
         safety=SafetyParams(),
         limits=RiskLimits(),
+        monitor_stale_seconds=max(settings.max_data_staleness_seconds, 30.0),
     )
-    tasks = [asyncio.create_task(sim.run(), name="engine")]
+    engine_task = asyncio.create_task(sim.run(), name="engine")
+    tasks = [engine_task]
     if not args.no_monitor:
         tasks.append(
             asyncio.create_task(run_monitor(settings, repo, rpc, provider), name="monitor")
@@ -129,7 +132,11 @@ async def _run(args: argparse.Namespace, settings: Settings, sessions, store: Si
             if task.exception() is not None:
                 raise task.exception()  # type: ignore[misc]
     finally:
+        # Parada ordenada: el motor termina la vuelta en curso (sin dejar órdenes a medias)
+        # y deja el estado en STOPPED; solo si no lo consigue a tiempo se cancela.
         sim.stop()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(engine_task), timeout=60)
         for task in tasks:
             task.cancel()
         for task in tasks:

@@ -84,7 +84,7 @@ class JupiterQuotes:
             self.requests += 1
             try:
                 response = await self._client.get(self._url, params=params)
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
+            except httpx.HTTPError as exc:
                 log.warning("jupiter_quote_transport_error", error=type(exc).__name__)
                 await self._sleep(1.5 * (attempt + 1))
                 continue
@@ -92,7 +92,14 @@ class JupiterQuotes:
                 retry_after = response.headers.get("Retry-After")
                 await self._sleep(float(retry_after) if retry_after else 1.5 * (attempt + 1))
                 continue
-            data = response.json() if response.content else {}
+            try:
+                data = response.json() if response.content else {}
+            except ValueError:  # p. ej. una página HTML de un cortafuegos
+                data = None
+            if not isinstance(data, dict):
+                raise QuoteError(
+                    f"Jupiter respondió {response.status_code} sin JSON: {response.text[:120]!r}"
+                )
             if response.status_code != 200:
                 if (
                     data.get("errorCode") in _NO_ROUTE_CODES
@@ -100,16 +107,22 @@ class JupiterQuotes:
                 ):
                     return None
                 raise QuoteError(f"Jupiter respondió {response.status_code}: {data}")
-            return Quote(
-                input_mint=input_mint,
-                output_mint=output_mint,
-                in_raw=int(data["inAmount"]),
-                out_raw=int(data["outAmount"]),
-                price_impact_pct=Decimal(str(data.get("priceImpactPct") or 0)) * 100,
-                route=tuple(
-                    str((leg.get("swapInfo") or {}).get("label", "?"))
-                    for leg in data.get("routePlan") or []
-                ),
-                at=self._clock(),
-            )
+            try:
+                return self._parse(data, input_mint, output_mint)
+            except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                raise QuoteError(f"respuesta inesperada de Jupiter: {exc!r}") from exc
         raise QuoteError(f"Jupiter sin respuesta tras {self._attempts} intentos")
+
+    def _parse(self, data: dict, input_mint: str, output_mint: str) -> Quote:
+        return Quote(
+            input_mint=input_mint,
+            output_mint=output_mint,
+            in_raw=int(data["inAmount"]),
+            out_raw=int(data["outAmount"]),
+            price_impact_pct=Decimal(str(data.get("priceImpactPct") or 0)) * 100,
+            route=tuple(
+                str((leg.get("swapInfo") or {}).get("label", "?"))
+                for leg in data.get("routePlan") or []
+            ),
+            at=self._clock(),
+        )

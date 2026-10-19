@@ -141,12 +141,15 @@ class World:
             sleep=self.latency,
         )
 
-    async def heartbeat(self) -> None:
+    async def heartbeat(self, ws_connected: bool = True) -> None:
+        details = {"ws_connected": ws_connected}
         async with self.sessions.begin() as s:
             await s.execute(
                 insert(ServiceHeartbeat)
-                .values(service="monitor", beat_at=self.clock(), details={})
-                .on_conflict_do_update(index_elements=["service"], set_={"beat_at": self.clock()})
+                .values(service="monitor", beat_at=self.clock(), details=details)
+                .on_conflict_do_update(
+                    index_elements=["service"], set_={"beat_at": self.clock(), "details": details}
+                )
             )
 
     async def follow(self, wallet: str = TRADER) -> None:
@@ -555,8 +558,123 @@ async def test_report_compares_realistic_and_theoretical_copy(world):
     assert signals.realized_usd == pos.realized_pnl_usd
     # Teórica: 10 $ a 0,01 y venta a 0,02 → +10 $. La realista pierde por costes.
     assert report.comparison.theoretical_usd == 10
-    assert Decimal(9) < report.comparison.realistic_usd < 10
+    assert Decimal(9) < report.comparison.realistic_comparable_usd < 10
+    assert report.comparison.realistic_usd == report.comparison.realistic_comparable_usd
     assert "MUESTRA INSUFICIENTE" in signals.sample_warning
     text = render(report)
-    assert "Copia teórica:   +10.00 $" in text and "Estado: RUNNING" in text
+    assert "frente a teórica +10.00 $" in text and "Estado: RUNNING" in text
     assert report.equity_usd == 100 + report.books[PORTFOLIO].realized_usd
+
+
+# --- Correcciones de la revisión adversarial ------------------------------------------
+
+
+async def test_risk_halt_cannot_be_bypassed_by_resume_or_restart(world):
+    eng = world.build(stop_loss_pct=Decimal(100))
+    await eng.start()
+    for i in range(1, 6):
+        await world.trade("buy", world.token(i), "50000", "500")
+    await eng.tick()
+    for i in range(1, 6):
+        world.quotes.price[mint(i)] = Decimal("0.004")
+    world.clock.advance(seconds=61)
+    await world.heartbeat()
+    await eng.tick()
+    assert (await eng.store.state()).state == "HALTED_RISK"
+    # Aunque alguien fuerce RUNNING (p. ej. «stop» y «run»), la cartera no compra.
+    await eng.store.set_state("STOPPED", "parada manual", "cli")
+    restarted = world.build(stop_loss_pct=Decimal(100))
+    await restarted.start()
+    assert (await restarted.store.state()).state == "HALTED_RISK"
+    await restarted.store.set_state("RUNNING", "forzado", "test")
+    await world.trade("buy", world.token(9), "50000", "500")
+    await restarted.tick()
+    (o,) = [o for o in await world.orders(book=PORTFOLIO) if o.mint == mint(9)]
+    assert o.status == "rejected" and "parada por riesgo" in o.status_reason
+
+
+async def test_partial_exit_scales_the_position_value(world):
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    world.quotes.price[m] = Decimal("0.03")  # x3
+    world.clock.advance(seconds=61)
+    await world.heartbeat()
+    await eng.tick()
+    (pos,) = await world.positions(PORTFOLIO)
+    before = pos.last_value_usd
+    await world.trade("sell", m, "25000", "750")  # el trader vende la mitad
+    await eng.tick()
+    (pos,) = await world.positions(PORTFOLIO)
+    rent = pos.rent_usd
+    # El valor de lo que queda es la mitad del de antes (la renta, entera).
+    assert abs((pos.last_value_usd - rent) - (before - rent) / 2) < Decimal("0.01")
+    state = await eng.store.book_state(PORTFOLIO)
+    assert state.equity_usd < Decimal(100) + (before - Decimal(10)) + Decimal("0.1")
+
+
+async def test_unexpected_errors_never_leave_orders_pending(world):
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+
+    async def boom(*args, **kwargs):
+        raise ValueError("respuesta rara")
+
+    real_buy = eng._executor.buy
+    eng._executor.buy = boom  # type: ignore[method-assign]
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    assert await world.orders(status="pending") == []
+    cash = await world.cash()
+    assert cash.reserved_usd == 0 and cash.cash_usd < 100  # paga la comisión
+
+    eng._executor.buy = real_buy  # type: ignore[method-assign]
+    await world.trade("buy", world.token(2), "50000", "500")
+    await eng.tick()
+    eng._executor.sell = boom  # type: ignore[method-assign]
+    await world.trade("sell", mint(2), "50000", "500")
+    world.quotes.quote = boom  # también falla la valoración
+    world.clock.advance(seconds=61)
+    await world.heartbeat()
+    assert await eng.tick()  # el motor sigue vivo
+    assert await world.orders(status="pending") == []
+    assert await world.ledger_is_balanced()
+
+
+async def test_only_one_engine_at_a_time(world):
+    store = world.build().store
+    async with store.exclusive_run() as first, store.exclusive_run() as second:
+        assert first and not second
+
+
+async def test_disconnected_websocket_switches_to_read_only(world):
+    eng = world.build()
+    await eng.start()
+    await world.heartbeat(ws_connected=False)
+    await eng.tick()
+    state = await eng.store.state()
+    assert state.state == "READ_ONLY" and "WebSocket" in state.reason
+
+
+async def test_stop_loss_still_watches_after_a_failed_partial_copy(world):
+    m = world.token(1)
+    eng = world.build(revalue_seconds=10)  # se valora antes de que toque reintentar (30 s)
+    await eng.start()
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    world.moves.append((m, Decimal("0.9")))  # la venta copiada falla por slippage
+    await world.trade("sell", m, "5000", "50")
+    await eng.tick()
+    (pos,) = await world.positions(PORTFOLIO)
+    assert pos.exit_pending and pos.exit_purpose == "copy_exit"
+    world.quotes.price[m] = Decimal("0.003")  # y luego se hunde
+    world.clock.advance(seconds=15)
+    await world.heartbeat()
+    await eng.tick()
+    (pos,) = await world.positions(PORTFOLIO)
+    assert pos.status == "closed"
+    purposes = [o.purpose for o in await world.orders(side="sell", book=PORTFOLIO)]
+    assert purposes == ["copy_exit", "stop_loss"]

@@ -6,11 +6,15 @@ from __future__ import annotations
 from decimal import Decimal
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from copybot.config import GroupSettings
 
 
-class EngineParams(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="COPYBOT_SIM_", extra="forbid")
+class EngineParams(GroupSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="COPYBOT_SIM_", env_file=".env", env_file_encoding="utf-8", extra="forbid"
+    )
 
     # Forma parte de la clave de idempotencia: cambiarla es una decisión nueva.
     decision_version: str = "1"
@@ -34,11 +38,13 @@ class EngineParams(BaseSettings):
     poll_seconds: float = Field(default=1.0, gt=0, le=60)
 
 
-class SafetyParams(BaseSettings):
+class SafetyParams(GroupSettings):
     """Filtros de seguridad de un token antes de comprarlo. Las autoridades de emisión y
     congelación, y las extensiones peligrosas de Token-2022, se rechazan siempre."""
 
-    model_config = SettingsConfigDict(env_prefix="COPYBOT_SAFETY_", extra="forbid")
+    model_config = SettingsConfigDict(
+        env_prefix="COPYBOT_SAFETY_", env_file=".env", env_file_encoding="utf-8", extra="forbid"
+    )
 
     min_liquidity_usd: Decimal = Field(default=Decimal(20_000), ge=0)
     max_price_impact_pct: Decimal = Field(default=Decimal(3), gt=0, le=50)

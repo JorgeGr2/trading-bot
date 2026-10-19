@@ -33,7 +33,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Protocol
 
 import structlog
@@ -121,12 +121,32 @@ class Engine:
 
     async def start(self) -> int:
         """Arranque: estado RECOVERING, órdenes a medias dadas por fallidas y, si el
-        sistema no estaba en pausa ni parado por riesgo, RUNNING."""
+        sistema no estaba en pausa ni parado por riesgo, RUNNING (o HALTED_RISK si los
+        límites de pérdida siguen superados)."""
         await self.store.initialize(self.limits.virtual_capital_usd)
-        state = (await self.store.state()).state
-        if state not in ("PAUSED", "HALTED_RISK"):
-            await self.store.set_state("RECOVERING", "arranque del motor", "engine")
+        book = await self.store.book_state(PORTFOLIO)
+        if self.limits.virtual_capital_usd < book.initial_usd:
+            raise RuntimeError(
+                f"la cartera guardada empezó con {book.initial_usd} $ y el capital configurado "
+                f"es {self.limits.virtual_capital_usd} $: para bajar el capital hay que "
+                "empezar una simulación nueva (base de datos vacía)"
+            )
+        # Un único UPDATE condicional: una pausa o parada hecha a la vez no se pierde.
+        await self.store.set_state(
+            "RECOVERING",
+            "arranque del motor",
+            "engine",
+            only_from=["RUNNING", "READ_ONLY", "RECOVERING", "STOPPED"],
+        )
         recovered = await self.store.recover_pending()
+        halts = halt_reasons(await self.store.roll_equity(PORTFOLIO), self.limits)
+        if halts:
+            text = "; ".join(detail for _, detail in halts)
+            if await self.store.set_state(
+                "HALTED_RISK", text, "engine", only_from=["RECOVERING", "PAUSED"]
+            ):
+                for kind, detail in halts:
+                    await self.store.risk_event(kind, PORTFOLIO, {"detalle": detail})
         await self.store.set_state(
             "RUNNING", "recuperación terminada", "engine", only_from=["RECOVERING"]
         )
@@ -137,42 +157,64 @@ class Engine:
         self._stop.set()
 
     async def run(self) -> None:
-        await self.start()
-        while not self._stop.is_set():
-            if not await self.tick():
-                break
-            await self._sleep(self.params.poll_seconds)
+        async with self.store.exclusive_run() as alone:
+            if not alone:
+                raise RuntimeError("ya hay otro motor de simulación en marcha")
+            await self.start()
+            try:
+                while not self._stop.is_set():
+                    if not await self.tick():
+                        break
+                    await self._sleep(self.params.poll_seconds)
+            finally:
+                await self.store.set_state(
+                    "STOPPED",
+                    "motor detenido",
+                    "engine",
+                    only_from=["RUNNING", "READ_ONLY", "RECOVERING"],
+                )
 
     async def tick(self) -> bool:
-        """Una vuelta del bucle. ``False`` si alguien ha parado el motor (STOPPED)."""
+        """Una vuelta del bucle. ``False`` si alguien ha parado el motor (STOPPED).
+
+        Cada fase va protegida: un fallo inesperado se registra y la vuelta sigue (la
+        siguiente lo reintenta), en vez de tumbar el motor.
+        """
         state = (await self.store.state()).state
         if state == "STOPPED":
             log.info("sim_stopped")
             return False
-        await self._check_feed(state)
-        await self.store.ingest_signals()
+        await self._guard("feed", self._check_feed(state))
+        await self._guard("ingest", self.store.ingest_signals())
         for signal in await self.store.pending_signals(BOOKS):
-            try:
-                await self.process_signal(signal)
-            except Exception as exc:  # una señal no debe tumbar el motor
-                log.exception("signal_failed", signal=signal.id, error=str(exc))
-        await self.retry_exits()
+            await self._guard(f"signal {signal.id}", self.process_signal(signal))
+        await self._guard("retry_exits", self.retry_exits())
         now = self._clock()
         if self._last_revalue is None or (now - self._last_revalue).total_seconds() >= (
             self.params.revalue_seconds
         ):
             self._last_revalue = now
-            await self.revalue()
+            await self._guard("revalue", self.revalue())
         return True
 
+    async def _guard(self, what: str, job: Awaitable[Any]) -> None:
+        try:
+            await job
+        except Exception as exc:
+            log.exception("sim_phase_failed", phase=what, error=str(exc))
+
     async def _check_feed(self, state: str) -> None:
-        """Sin latidos recientes del monitor no hay datos fiables: solo lectura."""
-        age = await self.store.monitor_heartbeat_age()
-        stale = age is None or age > self._stale
+        """Sin datos recientes del monitor (proceso vivo y WebSocket conectado), solo
+        lectura."""
+        age, details = await self.store.monitor_heartbeat()
+        ws_down = details.get("ws_connected") is False
+        stale = age is None or age > self._stale or ws_down
         if stale and state == "RUNNING":
             reason = (
                 "el monitor no da señales de vida"
                 if age is None
+                else "el WebSocket del monitor está desconectado"
+                if ws_down
                 else f"el último latido del monitor es de hace {age:.0f} s"
             )
             if await self.store.set_state("READ_ONLY", reason, "engine", only_from=["RUNNING"]):
@@ -199,6 +241,8 @@ class Engine:
 
     def _signal_reasons(self, signal: Signal, now: datetime) -> tuple[list[str], dict[str, Any]]:
         reasons = []
+        if signal.block_time is None and signal.detected_via == "backfill":
+            reasons.append("señal recuperada sin hora de bloque: no se sabe cuándo compró")
         ref = signal.block_time or signal.detected_at
         age = (now - ref).total_seconds()
         if age > self.params.max_signal_age_seconds:
@@ -274,7 +318,9 @@ class Engine:
             rent = 0 if existing is not None else profile.rent_lamports
             rent_usd = costs.lamports_usd(rent)
             # Los 10 $ lo incluyen todo: comisión de red y renta de la cuenta de token.
-            swap_usd = (size - costs.tx_fee_usd() - rent_usd).quantize(Decimal("0.000001"))
+            swap_usd = (size - costs.tx_fee_usd() - rent_usd).quantize(
+                Decimal("0.000001"), rounding=ROUND_DOWN
+            )
             if swap_usd <= 0:
                 await self._reject(
                     signal, book, "buy", "entry", ["las comisiones superan el tamaño"], decision
@@ -312,25 +358,33 @@ class Engine:
         executions: dict[Decimal, Execution] = {}
         price = self._trader_price(signal)
         for book, order_id, swap_usd, rent, rent_usd in orders:
-            if swap_usd not in executions:
-                t2 = views[swap_usd].t2
-                if t2 is None:  # no pasa: sin t2 la vista de mercado ya rechaza
-                    raise RuntimeError("compra sin cotización t2")
-                executions[swap_usd] = await self._buy(signal.mint, profile, swap_usd, t2, costs)
-            ex = executions[swap_usd]
-            if not ex.ok:
-                await self.store.fail_order(order_id, ex.reason, ex.fees_usd)
-                continue
-            size = sizes[book][0]
-            await self.store.fill_entry(
-                order_id,
-                ex,
-                rent_lamports=rent,
-                rent_usd=rent_usd,
-                theoretical_price=price,
-                theoretical_tokens=None if price is None else size / price,
-            )
-            log.info("sim_buy", book=book, mint=signal.mint, usd=str(swap_usd))
+            try:
+                if swap_usd not in executions:
+                    t2 = views[swap_usd].t2
+                    if t2 is None:  # no pasa: sin t2 la vista de mercado ya rechaza
+                        raise RuntimeError("compra sin cotización t2")
+                    executions[swap_usd] = await self._buy(
+                        signal.mint, profile, swap_usd, t2, costs
+                    )
+                ex = executions[swap_usd]
+                if not ex.ok:
+                    await self.store.fail_order(order_id, ex.reason, ex.fees_usd)
+                    continue
+                size = sizes[book][0]
+                await self.store.fill_entry(
+                    order_id,
+                    ex,
+                    rent_lamports=rent,
+                    rent_usd=rent_usd,
+                    theoretical_price=price,
+                    theoretical_tokens=None if price is None else size / price,
+                )
+                log.info("sim_buy", book=book, mint=signal.mint, usd=str(swap_usd))
+            except Exception as exc:  # la orden nunca se queda a medias con el dinero reservado
+                log.exception("buy_failed", order=order_id)
+                await self.store.fail_order(
+                    order_id, f"error al ejecutar: {exc!r}"[:300], costs.tx_fee_usd()
+                )
 
     async def _buy(
         self, mint: str, profile: TokenProfile, usd: Decimal, t2: Quote, costs: CostModel
@@ -339,7 +393,7 @@ class Engine:
             return await self._executor.buy(
                 mint, profile.decimals, usd, profile.transfer_fee_bps, t2, costs
             )
-        except QuoteError as exc:
+        except Exception as exc:
             # No sabemos si la transacción habría entrado: se cuenta como fallida y pagada.
             return Execution(
                 False, f"Jupiter no responde al ejecutar: {exc}", fees_usd=(costs.tx_fee_usd())
@@ -468,6 +522,8 @@ class Engine:
         fraction = signal.trader_sell_fraction
         decision["fraccion_vendida_trader"] = _dec(fraction)
         price = self._trader_price(signal)
+        # Se guarda para que los reintentos vendan la copia teórica al precio del trader.
+        decision["precio_teorico"] = None if price is None else str(price)
         for book in books:
             pos = await self.store.position_for(book, signal.mint, signal.wallet)
             if pos is None:
@@ -518,8 +574,10 @@ class Engine:
             ex = await self._executor.sell(
                 pos.mint, profile.decimals, amount, profile.transfer_fee_bps, costs
             )
-        except QuoteError as exc:
-            await self.store.fail_order(order_id, f"Jupiter no responde: {exc}", ZERO)
+        except Exception as exc:  # antes de «enviar» nada (cotización t2): sin comisión
+            await self.store.fail_order(
+                order_id, f"no se pudo cotizar la venta: {exc!r}"[:300], ZERO
+            )
             return False
         if not ex.ok:
             await self.store.fail_order(order_id, ex.reason, ex.fees_usd)
@@ -530,12 +588,19 @@ class Engine:
             # Sin precio del trader: la copia teórica vende al precio de mercado, sin costes.
             raw = ex.detail.get("t3_out")
             theoretical_price = None if raw is None else from_raw(int(raw), USDC_DECIMALS) / amount
-        await self.store.fill_exit(
-            order_id,
-            ex,
-            rent_refund_usd=costs.lamports_usd(pos.rent_lamports),
-            theoretical_price=theoretical_price,
-        )
+        try:
+            await self.store.fill_exit(
+                order_id,
+                ex,
+                rent_refund_usd=costs.lamports_usd(pos.rent_lamports),
+                theoretical_price=theoretical_price,
+            )
+        except Exception as exc:
+            log.exception("sell_record_failed", order=order_id)
+            await self.store.fail_order(
+                order_id, f"error al registrar la venta: {exc!r}"[:300], ex.fees_usd
+            )
+            return False
         log.info("sim_sell", book=pos.book, mint=pos.mint, usd=str(ex.usd_amount))
         return True
 
@@ -561,22 +626,31 @@ class Engine:
             last = await self.store.last_exit_order(pos.id)
             if last is None:
                 continue
-            attempts = await self.store.exit_attempts(pos.id, last.purpose)
-            wait = min(30 * 2 ** max(attempts - 1, 0), 1800)
+            # La espera crece con los fallos seguidos (no con las ventas que salieron bien).
+            failures = await self.store.consecutive_exit_failures(pos.id)
+            wait = min(30 * 2 ** max(failures - 1, 0), 1800)
             since = pos.last_exit_attempt_at or last.updated_at
             if (now - since).total_seconds() < wait:
                 continue
+            attempts = await self.store.exit_attempts(pos.id, last.purpose)
             amount = min(last.requested_amount or pos.amount, pos.amount)
+            theo = (last.decision or {}).get("precio_teorico")
             order_id = await self.store.open_exit(
                 position_id=pos.id,
                 key=self._key(pos.book, pos.id, last.purpose, "reintento", attempts),
                 amount=amount,
                 purpose=last.purpose,
                 signal_id=last.signal_id,
-                decision={"reintento": attempts, "orden_fallida": last.id},
+                decision={
+                    "reintento": attempts,
+                    "orden_fallida": last.id,
+                    "precio_teorico": theo,
+                },
             )
             if order_id is not None:
-                await self._sell(order_id, pos, amount)
+                await self._sell(
+                    order_id, pos, amount, theoretical_price=None if theo is None else Decimal(theo)
+                )
 
     # --- Valoración, stops y límites ----------------------------------------------------------
 
@@ -587,7 +661,9 @@ class Engine:
         max_hold = timedelta(hours=float(self.params.max_hold_hours))
         if costs is not None:
             for pos in await self.store.stale_positions(before, limit):
-                await self._revalue_position(pos, costs, now, max_hold)
+                await self._guard(
+                    f"revalue {pos.id}", self._revalue_position(pos, costs, now, max_hold)
+                )
         await self._check_risk(costs)
 
     async def _revalue_position(
@@ -604,6 +680,7 @@ class Engine:
                 pos.mint, USDC_MINT, sent, self.params.slippage_tolerance_bps
             )
         except QuoteError as exc:
+            # El valor se queda en la última valoración buena; el informe muestra su edad.
             log.warning("revalue_failed", position=pos.id, error=str(exc))
             return
         rent_refund = costs.lamports_usd(pos.rent_lamports)
@@ -615,7 +692,12 @@ class Engine:
                 costs.tx_fee_usd()
             )
             await self.store.mark_value(pos.id, max(token_value, ZERO) + rent_refund, False)
-        if pos.exit_pending:
+        # Con una venta total ya pendiente no hay nada más que decidir. Si lo pendiente es
+        # copiar una venta parcial del trader, el stop-loss y el tiempo máximo siguen
+        # vigilando el resto.
+        if pos.exit_pending and (
+            pos.exit_purpose != "copy_exit" or await self.store.has_pending_order(pos.id)
+        ):
             return
         if pos.cost_usd > 0:
             loss_pct = (1 - token_value / pos.cost_usd) * 100
@@ -632,10 +714,11 @@ class Engine:
         state = await self.store.roll_equity(PORTFOLIO)
         control = (await self.store.state()).state
         halts = halt_reasons(state, self.limits)
-        if halts and control in ("RUNNING", "READ_ONLY"):
+        # También desde PAUSED: queda registrado y «resume» exigirá que se cumplan.
+        if halts and control in ("RUNNING", "READ_ONLY", "PAUSED"):
             text = "; ".join(detail for _, detail in halts)
             if await self.store.set_state(
-                "HALTED_RISK", text, "engine", only_from=["RUNNING", "READ_ONLY"]
+                "HALTED_RISK", text, "engine", only_from=["RUNNING", "READ_ONLY", "PAUSED"]
             ):
                 for kind, detail in halts:
                     await self.store.risk_event(kind, PORTFOLIO, {"detalle": detail})
@@ -649,5 +732,15 @@ class Engine:
                 "sol_usd": None if costs is None else _dec(costs.sol_usd, 4),
                 "maximo_usd": _dec(state.peak_equity_usd),
                 "inicio_dia_usd": _dec(state.day_start_equity_usd),
+                "valoracion_mas_vieja_s": await self._oldest_valuation_s(),
             },
         )
+
+    async def _oldest_valuation_s(self) -> float | None:
+        """Antigüedad de la valoración más vieja de la cartera (precios congelados)."""
+        now = self._clock()
+        ages = [
+            (now - (p.last_valued_at or p.opened_at)).total_seconds()
+            for p in await self.store.open_positions(PORTFOLIO)
+        ]
+        return round(max(ages), 1) if ages else None

@@ -8,10 +8,12 @@ Ejecución simulada (apartado 6.1 del informe de la Fase 1):
 
 1. t2: cotización para nuestro tamaño (la recibe ya hecha, del filtro de mercado).
 2. Espera de verdad la latencia configurada (envío y confirmación).
-3. t3: vuelve a cotizar. Si se recibiría menos que en t2 menos la tolerancia de
-   slippage, la orden falla como fallaría on-chain y se paga igualmente la comisión.
-4. Si no falla, se aplica el recorte supuesto por MEV y la comisión de transferencia del
-   token (Token-2022).
+3. t3: vuelve a cotizar y aplica el recorte supuesto por MEV (un *sandwich* se lleva su
+   parte antes de que la transacción compruebe el mínimo). Si lo recibido queda por
+   debajo de lo cotizado en t2 menos la tolerancia de slippage, la orden falla como
+   fallaría on-chain y se paga igualmente la comisión. Si Jupiter no responde en t3, la
+   transacción ya se habría enviado: también falla y paga la comisión.
+4. Si no falla, se descuenta la comisión de transferencia del token (Token-2022).
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from copybot.sim.costs import CostModel
-from copybot.sim.quotes import Quote
+from copybot.sim.quotes import Quote, QuoteError
 from copybot.solana.constants import USDC_MINT
 
 USDC_DECIMALS = 6
@@ -78,24 +80,33 @@ class SimExecutor:
         self._tolerance = slippage_tolerance_bps
         self._sleep = sleep
 
-    def _slipped(self, t2: Quote, t3: Quote) -> Decimal | None:
-        """Cuánto ha empeorado t3 frente a t2, si supera la tolerancia."""
+    def _slipped(self, t2: Quote, received_raw: Decimal) -> Decimal | None:
+        """Cuánto peor que t2 sale lo recibido (tras MEV), si supera la tolerancia."""
         floor = Decimal(t2.out_raw) * (1 - Decimal(self._tolerance) / 10_000)
-        if Decimal(t3.out_raw) < floor:
-            return 1 - Decimal(t3.out_raw) / Decimal(t2.out_raw)
+        if received_raw < floor:
+            return 1 - received_raw / Decimal(t2.out_raw)
         return None
+
+    async def _t3(self, input_mint: str, output_mint: str, amount_raw: int) -> Quote | str | None:
+        try:
+            return await self._quotes.quote(input_mint, output_mint, amount_raw, self._tolerance)
+        except QuoteError as exc:
+            return f"Jupiter no responde al ejecutar (la transacción ya se habría enviado): {exc}"
 
     async def buy(
         self, mint: str, decimals: int, usd: Decimal, fee_bps: int, t2: Quote, costs: CostModel
     ) -> Execution:
         fee = costs.tx_fee_usd()
         await self._sleep(self._latency)
-        t3 = await self._quotes.quote(USDC_MINT, mint, to_raw(usd, USDC_DECIMALS), self._tolerance)
+        t3 = await self._t3(USDC_MINT, mint, to_raw(usd, USDC_DECIMALS))
         detail = {"t2_out": t2.out_raw, "t2_at": t2.at.isoformat(), "route": list(t2.route)}
+        if isinstance(t3, str):
+            return Execution(False, t3, fees_usd=fee, detail=detail)
         if t3 is None:
             return Execution(False, "sin ruta de compra al ejecutar", fees_usd=fee, detail=detail)
         detail |= {"t3_out": t3.out_raw, "t3_at": t3.at.isoformat()}
-        slipped = self._slipped(t2, t3)
+        after_mev_raw = costs.after_mev(Decimal(t3.out_raw))
+        slipped = self._slipped(t2, after_mev_raw)
         if slipped is not None:
             return Execution(
                 False,
@@ -103,9 +114,7 @@ class SimExecutor:
                 fees_usd=fee,
                 detail=detail,
             )
-        received = costs.after_transfer_fee(
-            costs.after_mev(from_raw(t3.out_raw, decimals)), fee_bps
-        )
+        received = costs.after_transfer_fee(after_mev_raw.scaleb(-decimals), fee_bps)
         return Execution(True, token_amount=received, usd_amount=usd, fees_usd=fee, detail=detail)
 
     async def sell(
@@ -118,12 +127,15 @@ class SimExecutor:
         if t2 is None:
             return Execution(False, "Jupiter no encuentra ruta de venta", no_route=True)
         await self._sleep(self._latency)
-        t3 = await self._quotes.quote(mint, USDC_MINT, sent, self._tolerance)
+        t3 = await self._t3(mint, USDC_MINT, sent)
         detail = {"t2_out": t2.out_raw, "t2_at": t2.at.isoformat(), "route": list(t2.route)}
+        if isinstance(t3, str):
+            return Execution(False, t3, fees_usd=fee, detail=detail)
         if t3 is None:
             return Execution(False, "sin ruta de venta al ejecutar", fees_usd=fee, detail=detail)
         detail |= {"t3_out": t3.out_raw, "t3_at": t3.at.isoformat()}
-        slipped = self._slipped(t2, t3)
+        after_mev_raw = costs.after_mev(Decimal(t3.out_raw))
+        slipped = self._slipped(t2, after_mev_raw)
         if slipped is not None:
             return Execution(
                 False,
@@ -131,7 +143,7 @@ class SimExecutor:
                 fees_usd=fee,
                 detail=detail,
             )
-        proceeds = costs.after_mev(from_raw(t3.out_raw, USDC_DECIMALS))
+        proceeds = after_mev_raw.scaleb(-USDC_DECIMALS)
         return Execution(
             True, token_amount=amount, usd_amount=proceeds, fees_usd=fee, detail=detail
         )

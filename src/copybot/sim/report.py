@@ -35,7 +35,7 @@ from copybot.db.models import (
     SimOrder,
     SimPosition,
 )
-from copybot.sim.store import PORTFOLIO, SIGNALS
+from copybot.sim.store import PORTFOLIO, SIGNALS, position_value
 
 ZERO = Decimal(0)
 
@@ -65,6 +65,8 @@ class BookResult:
     gross_win_usd: Decimal = ZERO
     gross_loss_usd: Decimal = ZERO
     network_fees_usd: Decimal = ZERO  # comisiones de red de compras, ventas y fallidas
+    failed_fees_usd: Decimal = ZERO  # comisiones de órdenes fallidas (no van a ninguna posición)
+    written_off: int = 0  # abiertas que no se pueden vender: cuentan como cerradas a 0
     realized_usd: Decimal = ZERO
     unrealized_usd: Decimal = ZERO
     fees_usd: Decimal = ZERO
@@ -73,7 +75,12 @@ class BookResult:
 
     @property
     def total_usd(self) -> Decimal:
-        return self.realized_usd + self.unrealized_usd
+        return self.realized_usd + self.unrealized_usd - self.failed_fees_usd
+
+    @property
+    def resolved(self) -> int:
+        """Operaciones con resultado conocido: cerradas más invendibles (a 0)."""
+        return self.closed_positions + self.written_off
 
     @property
     def profit_factor(self) -> Decimal | None:
@@ -81,19 +88,20 @@ class BookResult:
 
     @property
     def sample_warning(self) -> str:
-        if self.closed_positions < 30:
+        if self.resolved < 30:
             return "MUESTRA INSUFICIENTE (menos de 30 operaciones cerradas): no sirve para concluir"
-        if self.closed_positions < 100:
+        if self.resolved < 100:
             return "muestra pequeña (menos de 100 operaciones cerradas): conclusiones débiles"
         return ""
 
 
 @dataclass
 class Comparison:
-    closed: int
-    realistic_usd: Decimal
+    resolved: int  # cerradas + invendibles del libro de señales
+    realistic_usd: Decimal  # todas ellas, más las comisiones de sus órdenes fallidas
+    comparable: int  # las que tienen precio del trader (copia teórica posible)
+    realistic_comparable_usd: Decimal
     theoretical_usd: Decimal | None
-    theoretical_closed: int
     hold_sol_usd: Decimal | None
 
 
@@ -123,10 +131,7 @@ class Report:
         return self.cash_usd + self.reserved_usd + self.positions_value_usd
 
 
-def _position_value(p: SimPosition) -> Decimal:
-    if p.unsellable:
-        return ZERO
-    return p.last_value_usd if p.last_value_usd is not None else p.cost_usd + p.rent_usd
+_position_value = position_value
 
 
 async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime) -> Report:
@@ -168,15 +173,16 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
                 )
             ).all()
         )
+        with_sol = (
+            PortfolioSnapshot.book == PORTFOLIO,
+            PortfolioSnapshot.details["sol_usd"].astext.is_not(None),
+        )
         first = await s.scalar(
-            select(PortfolioSnapshot)
-            .where(PortfolioSnapshot.book == PORTFOLIO)
-            .order_by(PortfolioSnapshot.at)
-            .limit(1)
+            select(PortfolioSnapshot).where(*with_sol).order_by(PortfolioSnapshot.at).limit(1)
         )
         last = await s.scalar(
             select(PortfolioSnapshot)
-            .where(PortfolioSnapshot.book == PORTFOLIO)
+            .where(*with_sol)
             .order_by(PortfolioSnapshot.at.desc())
             .limit(1)
         )
@@ -206,9 +212,10 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
         books[book].network_fees_usd = Decimal(value or 0)
     for book, value in failed_fees.items():
         books[book].network_fees_usd += Decimal(value or 0)
+        books[book].failed_fees_usd = Decimal(value or 0)
 
     open_rows = []
-    closed_signals = []
+    resolved_signals: list[tuple[SimPosition, Decimal]] = []
     for p in positions:
         r = books[p.book]
         r.realized_usd += p.realized_pnl_usd
@@ -216,6 +223,13 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
             r.open_positions += 1
             value = _position_value(p)
             r.unrealized_usd += value - p.cost_usd - p.rent_usd
+            if p.unsellable:
+                # Sin ruta de venta: se da por perdida (sesgo de supervivencia si no).
+                result = p.realized_pnl_usd - p.cost_usd - p.rent_usd
+                r.written_off += 1
+                r.gross_loss_usd += result
+                if p.book == SIGNALS:
+                    resolved_signals.append((p, result))
             open_rows.append(
                 {
                     "libro": p.book,
@@ -236,12 +250,13 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
             else:
                 r.gross_loss_usd += p.realized_pnl_usd
             if p.book == SIGNALS:
-                closed_signals.append(p)
+                resolved_signals.append((p, p.realized_pnl_usd))
 
-    theoretical = [
-        p.theoretical_proceeds_usd - entry_cost[p.id]
-        for p in closed_signals
-        if p.theoretical_amount is not None and entry_cost[p.id] > 0
+    # Copia teórica: solo las cerradas con precio del trader; la realista, sobre las mismas.
+    comparable = [
+        (p, result)
+        for p, result in resolved_signals
+        if p.status == "closed" and p.theoretical_amount is not None and entry_cost[p.id] > 0
     ]
     hold_sol = None
     if first is not None and last is not None and cash is not None:
@@ -250,10 +265,16 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
         if start and end:
             hold_sol = cash.initial_usd * (Decimal(end) / Decimal(start) - 1)
     comparison = Comparison(
-        closed=len(closed_signals),
-        realistic_usd=sum((p.realized_pnl_usd for p in closed_signals), ZERO),
-        theoretical_usd=sum(theoretical, ZERO) if theoretical else None,
-        theoretical_closed=len(theoretical),
+        resolved=len(resolved_signals),
+        realistic_usd=sum((result for _, result in resolved_signals), ZERO)
+        - books[SIGNALS].failed_fees_usd,
+        comparable=len(comparable),
+        realistic_comparable_usd=sum((result for _, result in comparable), ZERO),
+        theoretical_usd=sum(
+            (p.theoretical_proceeds_usd - entry_cost[p.id] for p, _ in comparable), ZERO
+        )
+        if comparable
+        else None,
         hold_sol_usd=hold_sol,
     )
 
@@ -277,8 +298,8 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
             t["resultado"] += _position_value(p) - p.cost_usd - p.rent_usd
         else:
             t["cerradas"] += 1
-            t["real_cerradas"] += p.realized_pnl_usd
             if p.theoretical_amount is not None and entry_cost[p.id] > 0:
+                t["real_cerradas"] += p.realized_pnl_usd  # sobre las mismas que la teórica
                 t["teorica_cerradas"] = (t["teorica_cerradas"] or ZERO) + (
                     p.theoretical_proceeds_usd - entry_cost[p.id]
                 )
@@ -344,7 +365,9 @@ def render(report: Report, *, full: bool = True) -> str:
         (SIGNALS, "Libro de señales (10 $ por señal)"),
     ):
         r = report.books[name]
-        win = f", {r.wins}/{r.closed_positions} con ganancia" if r.closed_positions else ""
+        win = f", {r.wins}/{r.resolved} con ganancia" if r.resolved else ""
+        if r.written_off:
+            win += f" ({r.written_off} invendibles contadas como pérdida total)"
         out.append(f"\n{title}")
         out.append(
             f"  Compras {r.entries_filled}, ventas {r.exits_filled}; abiertas {r.open_positions}, "
@@ -352,15 +375,14 @@ def render(report: Report, *, full: bool = True) -> str:
         )
         out.append(
             f"  Resultado {_usd(r.total_usd)} (realizado {_usd(r.realized_usd)}, "
-            f"sin realizar {_usd(r.unrealized_usd)})"
+            f"sin realizar {_usd(r.unrealized_usd)}, comisiones de órdenes fallidas "
+            f"{_usd(-r.failed_fees_usd)})"
         )
         pf = "—" if r.profit_factor is None else f"{r.profit_factor:.2f}"
-        per_trade = (
-            f"{r.network_fees_usd / r.closed_positions:,.3f} $" if r.closed_positions else "—"
-        )
+        per_trade = f"{r.network_fees_usd / r.resolved:,.3f} $" if r.resolved else "—"
         out.append(
             f"  Profit factor {pf}; comisiones de red {r.network_fees_usd:,.2f} $ "
-            f"({per_trade} por operación cerrada; sin contar MEV ni impacto, que van en el "
+            f"({per_trade} por operación; sin contar MEV ni impacto, que van en el "
             "precio)"
         )
         if r.sample_warning:
@@ -371,12 +393,20 @@ def render(report: Report, *, full: bool = True) -> str:
                     out.append(f"  {label} ({sum(counter.values())}):")
                     out += [f"    {n:>4} × {why}" for why, n in counter.most_common(8)]
     c = report.comparison
-    out.append(f"\nComparación (posiciones cerradas del libro de señales: {c.closed})")
-    out.append(f"  Copia realista:  {_usd(c.realistic_usd)}")
     out.append(
-        f"  Copia teórica:   {_usd(c.theoretical_usd)}"
-        + (f" (sobre {c.theoretical_closed} con precio del trader)" if c.theoretical_usd else "")
+        f"\nComparación (libro de señales: {c.resolved} con resultado, cerradas o invendibles)"
     )
+    out.append(
+        f"  Copia realista:  {_usd(c.realistic_usd)} (incluidas las comisiones de órdenes fallidas)"
+    )
+    if c.comparable:
+        out.append(
+            f"  Sobre las {c.comparable} con precio del trader: realista "
+            f"{_usd(c.realistic_comparable_usd)} frente a teórica {_usd(c.theoretical_usd)} "
+            "(la diferencia es lo que se come la ejecución)"
+        )
+    else:
+        out.append("  Copia teórica:   — (aún no hay operaciones cerradas con precio del trader)")
     out.append("  No operar:       +0.00 $")
     out.append(f"  Mantener SOL:    {_usd(c.hold_sol_usd)} (100 $ desde el primer registro)")
     if full and report.open_positions:

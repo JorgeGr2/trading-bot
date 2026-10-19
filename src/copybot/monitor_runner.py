@@ -36,8 +36,15 @@ def make_rpc(settings: Settings, repo: Repository) -> tuple[SolanaRpc, str]:
     return rpc, provider
 
 
+HEARTBEAT_SECONDS = 10
+
+
 async def run_monitor(settings: Settings, repo: Repository, rpc: SolanaRpc, provider: str) -> int:
-    """Sigue en vivo las wallets activas hasta que se cancele. 2 si no hay ninguna."""
+    """Sigue en vivo las wallets activas hasta que se cancele. 2 si no hay ninguna.
+
+    Cada 10 s deja un latido con sus contadores y si el WebSocket está conectado: el
+    motor de simulación pasa a solo lectura si deja de latir o se desconecta.
+    """
     _, ws_url = settings.rpc_endpoints()
     monitor = WalletMonitor(rpc, repo, relayers=frozenset({settings.fomo_relayer}), source=provider)
     wallets = await repo.active_wallets()
@@ -56,9 +63,10 @@ async def run_monitor(settings: Settings, repo: Repository, rpc: SolanaRpc, prov
                     if monitor.last_live_at
                     else None,
                     "at": datetime.now(UTC).isoformat(),
+                    "ws_connected": subscriber.connected,
                 },
             )
-            await asyncio.sleep(30)
+            await asyncio.sleep(HEARTBEAT_SECONDS)
 
     subscriber = LogsSubscriber(ws_url, wallets)
     beat = asyncio.create_task(heartbeat())

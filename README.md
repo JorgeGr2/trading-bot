@@ -2,8 +2,8 @@
 
 Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
 
-> **Estado:** Fase 3 (descubrimiento y puntuación de traders), aprobada a falta de la
-> ampliación con la leaderboard de FOMO; resultados en el informe de la Fase 3.
+> **Estado:** Fase 4 (motor de simulación, filtros de seguridad y gestión de riesgo),
+> pendiente de aprobación; resultados en el informe de la Fase 4.
 > El proyecto solo simula: no maneja claves privadas, no firma transacciones y no envía
 > órdenes. Un test impide añadir ese tipo de código. El modo con dinero real solo se
 > planteará si la simulación cumple los criterios fijados de antemano (apartado 12 del
@@ -17,6 +17,8 @@ Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
   [`docs/informes/fase-2.md`](docs/informes/fase-2.md)
 - Informe de la Fase 3 (descubrimiento y puntuación de traders, resultados con datos
   reales): [`docs/informes/fase-3.md`](docs/informes/fase-3.md)
+- Informe de la Fase 4 (simulación de copy-trading con dos libros, riesgo y prueba en
+  vivo): [`docs/informes/fase-4.md`](docs/informes/fase-4.md)
 
 ## Qué hace ahora mismo
 
@@ -35,8 +37,15 @@ Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
   por qué. Cada cálculo se guarda con su fecha (`as_of`) y la versión de sus parámetros,
   y nunca usa información posterior a esa fecha.
 
-Todavía no simula operaciones, no tiene interfaz gráfica ni bot de Telegram. Eso llega
-en las fases siguientes.
+- **Simula el copy-trading en vivo, sin dinero real.** Cada compra de un trader seguido
+  pasa por filtros del token y del mercado y por los límites de riesgo. Después se
+  «ejecuta» con cotizaciones reales de Jupiter: latencia, slippage, MEV, comisiones y
+  renta de la cuenta de token. Lleva dos libros: la cartera de 100 $ con todos los
+  límites y un libro que copia cada señal con 10 $ para medir su calidad. Copia las
+  ventas del trader en la misma proporción y tiene stop-loss, venta a las 48 h, parada
+  automática por pérdidas y modo de solo lectura si el monitor deja de dar datos.
+
+Todavía no tiene interfaz gráfica ni bot de Telegram. Eso llega en las fases siguientes.
 
 ## Uso para desarrolladores
 
@@ -69,6 +78,20 @@ uv run copybot analyze --as-of 2026-10-18T18:00:00     # o a una fecha pasada
 uv run copybot traders ranking                         # ranking con motivos
 uv run copybot traders show <wallet>                   # explicación completa
 ```
+
+Simulación (sigue las wallets añadidas con `copybot wallets add`):
+
+```bash
+uv run copybot sim run                 # motor + monitor en vivo (Ctrl+C para parar)
+uv run copybot sim run --minutes 90    # o solo un rato
+uv run copybot sim status              # estado y resumen
+uv run copybot sim report              # informe completo y comparaciones
+uv run copybot sim pause | resume | stop
+```
+
+Los parámetros del motor se cambian con variables `COPYBOT_SIM_*` (latencia, slippage,
+stop-loss…) y los de los filtros con `COPYBOT_SAFETY_*`; los límites de riesgo
+(`COPYBOT_RISK_*`) solo pueden endurecerse.
 
 El fichero de `discover add --file` tiene una wallet por línea: `dirección` o
 `dirección, etiqueta`. Para medir a 90 días: `COPYBOT_SCORING_WINDOW_DAYS=90`.

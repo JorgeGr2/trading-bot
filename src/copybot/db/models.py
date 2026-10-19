@@ -432,6 +432,8 @@ class SimPosition(Base):
     rent_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))  # pagado al abrir
     # Copia teórica: lo que habría pasado comprando y vendiendo al precio del trader.
     theoretical_entry_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    # Tokens que tendría una copia sin costes al precio del trader (None: sin precio).
+    theoretical_amount: Mapped[Decimal | None] = mapped_column(AMOUNT)
     theoretical_proceeds_usd: Mapped[Decimal] = mapped_column(AMOUNT, default=Decimal(0))
     last_value_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
     last_valued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

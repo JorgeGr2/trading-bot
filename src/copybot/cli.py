@@ -3,6 +3,7 @@
 copybot wallets add <dirección> [--label TEXTO]
 copybot wallets list
 copybot monitor
+copybot sim run | status | report | pause | resume | stop
 
 Descubrimiento y análisis de traders: ver ``copybot.traders_cli``.
 """
@@ -11,24 +12,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
 
 import structlog
 
 from copybot import logging as copylog
-from copybot import traders_cli
+from copybot import sim_cli, traders_cli
 from copybot.config import Settings
 from copybot.db.repo import Repository
 from copybot.db.session import make_engine, make_sessionmaker
-from copybot.ingest.wallets import WalletMonitor
-from copybot.solana.rpc import SolanaRpc
-from copybot.solana.ws import LogsSubscriber
+from copybot.monitor_runner import make_rpc, run_monitor
 
 log = structlog.get_logger(__name__)
-
-
-def _provider_name(url: str) -> str:
-    return "helius" if "helius" in url else "solana-public" if "solana.com" in url else "rpc"
 
 
 async def _wallets(args: argparse.Namespace, settings: Settings) -> int:
@@ -47,50 +41,14 @@ async def _wallets(args: argparse.Namespace, settings: Settings) -> int:
 
 
 async def _monitor(settings: Settings) -> int:
-    rpc_url, ws_url = settings.rpc_endpoints()
-    provider = _provider_name(rpc_url)
     engine = make_engine(settings.database_url.get_secret_value())
     repo = Repository(make_sessionmaker(engine))
-
-    async def on_usage(method: str, requests: int, credits: int) -> None:
-        await repo.record_usage(provider, method, requests, credits=credits)
-
-    rpc = SolanaRpc(
-        rpc_url,
-        rate_per_second=settings.rpc_max_requests_per_second,
-        timeout_seconds=settings.rpc_timeout_seconds,
-        on_usage=on_usage,
-    )
-    monitor = WalletMonitor(rpc, repo, relayers=frozenset({settings.fomo_relayer}), source=provider)
-    wallets = await repo.active_wallets()
-    if not wallets:
-        log.error("no_wallets", hint="añade wallets con: copybot wallets add <dirección>")
-        return 2
-    log.info("monitor_start", wallets=len(wallets), provider=provider)
-
-    async def heartbeat() -> None:
-        while True:
-            await repo.heartbeat(
-                "monitor",
-                {
-                    "stats": monitor.stats,
-                    "last_live_at": monitor.last_live_at.isoformat()
-                    if monitor.last_live_at
-                    else None,
-                    "at": datetime.now(UTC).isoformat(),
-                },
-            )
-            await asyncio.sleep(30)
-
-    subscriber = LogsSubscriber(ws_url, wallets)
-    beat = asyncio.create_task(heartbeat())
+    rpc, provider = make_rpc(settings, repo)
     try:
-        await monitor.run(subscriber.stream())
+        return await run_monitor(settings, repo, rpc, provider)
     finally:
-        beat.cancel()
         await rpc.aclose()
         await engine.dispose()
-    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     wsub.add_parser("list")
     sub.add_parser("monitor", help="seguir las wallets en vivo")
     traders_cli.add_parsers(sub)
+    sim_cli.add_parsers(sub)
     args = parser.parse_args(argv)
 
     settings = Settings()
@@ -113,6 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "monitor":
         copylog.configure()
         return asyncio.run(_monitor(settings))
+    if args.command == "sim":
+        copylog.configure("INFO" if args.action == "run" else "WARNING")
+        return asyncio.run(sim_cli.run(args, settings))
     # El análisis escribe un informe legible; los logs, solo si hay avisos.
     copylog.configure("WARNING")
     return asyncio.run(traders_cli.run(args, settings))

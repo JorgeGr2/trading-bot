@@ -340,9 +340,13 @@ class SimStore:
         rent_lamports: int,
         rent_usd: Decimal,
         theoretical_price: Decimal | None,
+        theoretical_tokens: Decimal | None = None,
     ) -> int | None:
         """Registra la compra. Devuelve la posición, o ``None`` si la orden ya no estaba
-        pendiente (idempotente)."""
+        pendiente (idempotente).
+
+        ``theoretical_*``: la misma compra sin costes, al precio que pagó el trader.
+        """
         now = self._clock()
         async with self._sessions.begin() as s:
             order = await s.scalar(
@@ -390,6 +394,7 @@ class SimStore:
                     rent_lamports=rent_lamports,
                     rent_usd=rent_usd,
                     theoretical_entry_price=theoretical_price,
+                    theoretical_amount=theoretical_tokens,
                     theoretical_proceeds_usd=ZERO,
                     unsellable=False,
                     exit_pending=False,
@@ -403,6 +408,15 @@ class SimStore:
                 position.invested_usd += spent
                 position.rent_lamports += rent_lamports
                 position.rent_usd += rent_usd
+                old, old_price = position.theoretical_amount, position.theoretical_entry_price
+                if None in (old, old_price, theoretical_tokens, theoretical_price):
+                    position.theoretical_amount = position.theoretical_entry_price = None
+                else:
+                    total = old + theoretical_tokens
+                    position.theoretical_entry_price = (
+                        old * old_price + theoretical_tokens * theoretical_price
+                    ) / total
+                    position.theoretical_amount = total
             await s.flush()
             order.position_id = position.id
             if order.book == PORTFOLIO:
@@ -547,10 +561,14 @@ class SimStore:
         ex: Execution,
         *,
         rent_refund_usd: Decimal,
-        theoretical_proceeds_usd: Decimal = ZERO,
+        theoretical_price: Decimal | None = None,
     ) -> bool:
         """Registra la venta. Nunca vende más de lo que hay; si no queda nada, cierra la
-        posición y recupera la renta de la cuenta de token."""
+        posición y recupera la renta de la cuenta de token.
+
+        La copia teórica vende la misma fracción de sus tokens a ``theoretical_price``
+        (sin precio, la copia teórica de esta posición deja de ser comparable).
+        """
         now = self._clock()
         async with self._sessions.begin() as s:
             order = await s.scalar(
@@ -568,6 +586,12 @@ class SimStore:
             if sold <= 0:
                 raise RuntimeError(f"venta sin tokens en la posición {pos.id}")
             cost_part = pos.cost_usd * sold / pos.amount
+            if pos.theoretical_amount is not None and theoretical_price is not None:
+                theo_sold = pos.theoretical_amount * sold / pos.amount
+                pos.theoretical_amount -= theo_sold
+                pos.theoretical_proceeds_usd += theo_sold * theoretical_price
+            else:
+                pos.theoretical_amount = None
             proceeds, fees = ex.usd_amount, ex.fees_usd
             s.add(
                 SimFill(
@@ -584,7 +608,6 @@ class SimStore:
             pos.cost_usd -= cost_part
             pos.proceeds_usd += proceeds
             pos.realized_pnl_usd += proceeds - fees - cost_part
-            pos.theoretical_proceeds_usd += theoretical_proceeds_usd
             pos.exit_pending = False
             pos.exit_purpose = None
             entries = {
@@ -642,6 +665,41 @@ class SimStore:
                 )
                 or 0
             )
+
+    async def last_exit_order(self, position_id: int) -> SimOrder | None:
+        async with self._sessions() as s:
+            return await s.scalar(
+                select(SimOrder)
+                .where(SimOrder.position_id == position_id, SimOrder.side == "sell")
+                .order_by(SimOrder.id.desc())
+                .limit(1)
+            )
+
+    async def has_pending_order(self, position_id: int) -> bool:
+        async with self._sessions() as s:
+            return bool(
+                await s.scalar(
+                    select(
+                        exists().where(
+                            SimOrder.position_id == position_id, SimOrder.status == "pending"
+                        )
+                    )
+                )
+            )
+
+    async def stale_positions(self, before: datetime, limit: int) -> list[SimPosition]:
+        """Posiciones abiertas sin valorar desde ``before`` (las más antiguas primero)."""
+        stmt = (
+            select(SimPosition)
+            .where(
+                SimPosition.status == "open",
+                (SimPosition.last_valued_at.is_(None)) | (SimPosition.last_valued_at < before),
+            )
+            .order_by(SimPosition.last_valued_at.asc().nulls_first(), SimPosition.id)
+            .limit(limit)
+        )
+        async with self._sessions() as s:
+            return list(await s.scalars(stmt))
 
     async def mark_value(self, position_id: int, value: Decimal, unsellable: bool) -> None:
         async with self._sessions.begin() as s:

@@ -110,6 +110,7 @@ def upgrade() -> None:
         sa.Column("rent_lamports", sa.BigInteger(), nullable=False),
         sa.Column("rent_usd", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("theoretical_entry_price", sa.Numeric(precision=38, scale=18), nullable=True),
+        sa.Column("theoretical_amount", sa.Numeric(precision=38, scale=18), nullable=True),
         sa.Column("theoretical_proceeds_usd", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("last_value_usd", sa.Numeric(precision=38, scale=18), nullable=True),
         sa.Column("last_valued_at", sa.DateTime(timezone=True), nullable=True),

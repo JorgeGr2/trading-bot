@@ -14,14 +14,14 @@
 - **Cumple todos los criterios de aceptación de la Fase 4** fijados en la Fase 1. Lo prueban 276 tests en verde: PnL y costes exactos, slippage, tamaño, stops, caída máxima y pausa automática, rechazo por datos insuficientes, saldos nunca negativos, nunca vende más de lo que tiene, y no duplica nada tras matar el proceso a mitad de una orden.
 - **Dos revisiones adversariales independientes** encontraron 45 problemas reales (34 + 11), todos corregidos; los que cambian el comportamiento, con su test. Los más graves: un descuadre del diario por redondeo, órdenes que se podían quedar a medias, el valor de una posición tras una venta parcial, y caminos para saltarse la parada por riesgo.
 - **En vivo:**
-  - detecta las operaciones en **1,0 s** (mediana) y decide en **2,3 s**;
-  - con la configuración aprobada no copió ninguna de 53 compras en 2 horas (por los filtros);
+  - detecta las operaciones en **1,0 s** (mediana), decide en unos **4 s** y la compra simulada termina a los **6 s** de la operación del trader;
+  - con la configuración aprobada no copió ninguna de 40 compras en 2 horas (por los filtros);
   - con dos filtros relajados copió 5 y comprobó toda la cadena;
   - en el token más operado, comprar y vender a la vez cuesta un **6,4 %**.
 - **Leaderboard y Kimchi:**
-  - he analizado **308 traders** de la leaderboard de FOMO (fomoapi.io); como grupo pierden: −14 % de mediana por operación en 30 días;
+  - he analizado **308 traders** de la leaderboard de FOMO (fomoapi.io); como grupo pierden en los últimos 30 días: −20 % de mediana por operación, y −14 % entre los 57 que se pueden puntuar;
   - **5 de 230 traders puntuables** tienen ventaja después del coste de copiar: A9aqAHUX, @nekomayu, @OinkersRUs, @kecoseh y @Washedupke3d;
-  - **Kimchi es un token**, no un trader: lo ganaron quienes lo compraron hace meses, y quienes lo han operado esta semana y ya vendieron perdieron.
+  - **Kimchi es un token**, no un trader: lo ganaron sobre todo quienes lo compraron hace meses; entre quienes lo han operado esta semana, los resultados son dispares.
 - **Nada demuestra todavía que copiar sea rentable.** Eso solo lo dirán el backtester (Fase 5) y una prueba larga en vivo (Fase 8).
 
 ## 2. Qué se ha construido
@@ -199,24 +199,24 @@ Lo que queda abierto está en el apartado 8.
 `copybot sim run --minutes 120`, con el código ya corregido, siguiendo 19 wallets:
 
 - `A9aqAHUX…`, el candidato de la Fase 3, y otra wallet puntuada en esa fase;
-- los cuatro traders puntuables de la leaderboard (@nekomayu, @OinkersRUs, @kecoseh, @Washedupke3d);
+- los cuatro traders de la leaderboard con ventaja (@nekomayu, @OinkersRUs, @kecoseh, @Washedupke3d);
 - seis que tienen Kimchi;
 - siete de los mejores de las últimas 24 h.
 
 | Medida | Resultado |
 |---|---|
-| Compraventas detectadas en vivo | 143 transacciones; 67 señales (53 compras y 14 ventas) |
+| Compraventas detectadas en vivo | 145 transacciones; 53 señales (40 compras y 13 ventas) |
 | **Latencia de detección** (bloque → señal) | **mediana 1,0 s, percentil 95 1,5 s** |
 | Huecos recuperados / errores del proveedor | 2 transacciones recuperadas, 0 errores; 4 desconexiones del WebSocket, todas recuperadas solas |
-| Compras copiadas | **0**: las 53 se rechazaron por los filtros (abajo) |
-| Ventas | 14, ninguna con posición copiada |
+| Compras copiadas | **0**: las 40 se rechazaron por los filtros (abajo) |
+| Ventas | 13, ninguna con posición copiada |
 | Estado | `RUNNING` todo el tiempo, salvo unos segundos en `READ_ONLY` al arrancar, mientras el WebSocket se conectaba (comportamiento esperado) |
-| Registros del patrimonio | 161, uno por minuto, con el precio de SOL |
+| Registros del patrimonio | 119, uno por minuto, con el precio de SOL |
 
 **¿Por qué no se copió nada?**
 
-- **42 de las 53 compras eran del mismo token**: *Elon Coin* (`B2GESk…`), recomprado una y otra vez por @surgz (35), @bigbabba (4) e @Iri0o (3). Cobra un 1 % por transferencia y su creador conserva la autoridad para cambiarlo, así que el filtro lo rechaza.
-- **Las otras 11 eran de tokens con 4.000-19.700 $ de liquidez**, por debajo del mínimo de 20.000 $. Uno además cobraba un 3 % por transferencia.
+- **30 de las 40 compras eran del mismo token**: *Elon Coin* (`B2GESk…`), recomprado una y otra vez por @surgz (23), @bigbabba (4) e @Iri0o (3). Cobra un 1 % por transferencia y su creador conserva la autoridad para cambiarlo, así que el filtro lo rechaza.
+- **De las otras 10**, 9 eran de tokens con 4.600-19.700 $ de liquidez (por debajo del mínimo de 20.000 $) y 1 cobraba un 3 % por transferencia.
 
 Los filtros funcionaron como están definidos, pero con estos traders son lo que decide. Lo he comprobado en la cadena: en Token-2022, si el creador sube la comisión, el cambio no entra en vigor hasta **dos épocas después** (unos 4-5 días) y queda visible en la propia cuenta como «nueva comisión». Como nuestras posiciones duran como mucho 48 h y el filtro ya mira la comisión nueva programada, **la regla «el creador puede subir la comisión» se podría relajar sin riesgo real**. Lo dejo como decisión tuya (apartado 9).
 
@@ -236,14 +236,14 @@ La configuración aprobada no cambia. Se siguieron 30 traders (los 19 anteriores
 | Señales | 9 (5 compras y 4 ventas) en 60 minutos |
 | Compras copiadas | **5 ejecuciones**: 2 en la cartera y 3 en el libro de señales |
 | Rechazos | 2 compras por impacto > 3 % (3,16 % y 4,39 %); 1 por tener ya posición en el token; 4 ventas sin posición copiada |
-| Tiempo hasta decidir | **2,0-2,8 s** desde el bloque del trader (media 2,3 s) |
-| De la cotización t2 a la t3 | 2,3-2,4 s (1,5 s de latencia simulada y el tiempo de las cotizaciones) |
+| Tiempos desde el bloque del trader | Empieza a evaluar la señal a los **2,0-3,5 s** (media 2,5 s); **decide** (crea la orden) a los **3,9-4,4 s**; la compra simulada **termina a los 5,5-6,0 s**. Los filtros y las cotizaciones de Jupiter (limitadas a 0,9 por segundo) se llevan unos 2 s |
+| De la cotización t2 a la t3 | 1,95-2,40 s (1,5 s de latencia simulada y el tiempo de las cotizaciones) |
 | Precio conseguido | 0,001813 $ por token frente a 0,001820 $ del trader (*Elon Coin*): prácticamente el mismo |
 | Coste de comprar y vender a la vez (ese token) | **6,4 %**: impacto, rutas de tres saltos y el 1 % de comisión de transferencia en cada sentido |
 | Resultado al cerrar la prueba | Cartera 100,81 $ (+0,8 %, sin realizar); libro de señales +1,55 $ sin realizar. Mantener SOL: −0,63 $ |
 | Cierre | Limpio: estado `STOPPED` a las 08:05:16 y salida con código 0 |
 
-Las rutas reales de Jupiter fueron de tres saltos (Kipseli/BisonFi → Meteora DLMM → Raydium CP). Al cerrar la prueba quedan abiertas dos posiciones en cada libro: *Elon Coin* (de @surgz) y un token comprado a las 08:05 por la wallet `GYQ4…` de la Fase 3. Con una hora de prueba no hubo ventas copiadas. Las ventas, el stop-loss y el tiempo máximo están probados con tests, pero falta verlos en una prueba larga (Fase 8).
+Las rutas reales de Jupiter fueron de tres saltos en *Elon Coin* (Kipseli/BisonFi → Meteora DLMM → Raydium CP) y de dos en el token de las 08:05 (Kipseli → Pump.fun Amm). Al cerrar la prueba quedan abiertas dos posiciones en cada libro: *Elon Coin* (de @surgz) y un token comprado a las 08:05 por la wallet `GYQ4…` de la Fase 3. Con una hora de prueba no hubo ventas copiadas. Las ventas, el stop-loss y el tiempo máximo están probados con tests, pero falta verlos en una prueba larga (Fase 8).
 
 **Conclusión de la prueba:** la cadena completa funciona con datos reales:
 
@@ -257,7 +257,7 @@ Las rutas reales de Jupiter fueron de tres saltos (Kipseli/BisonFi → Meteora D
 8. valoración cada minuto;
 9. informe y parada ordenada.
 
-Y lo hace en unos 2,3 s desde la operación del trader. **El coste real de copiar es alto en estos tokens**: un 6,4 % de ida y vuelta en el único token con varias operaciones. Cada operación copiada necesita subir más que eso para ganar dinero.
+Desde la operación del trader, decide en unos 4 s y termina la compra simulada a los 6 s. Se puede acelerar pidiendo las cotizaciones en paralelo; con el límite gratuito de Jupiter, de 1 por segundo, no mucho. **El coste real de copiar es alto en estos tokens**: un 6,4 % de ida y vuelta en el único token con varias operaciones. Cada operación copiada necesita subir más que eso para ganar dinero.
 
 ## 6. Leaderboard de FOMO y Kimchi
 
@@ -275,16 +275,18 @@ Comprobación: las wallets de estas fichas son las que firman como trader en las
 
 | Origen | Traders | Puntuables | Con ventaja tras el coste de copiar | Rentabilidad mediana por operación (prudente) | % en positivo | Resultado conjunto |
 |---|---|---|---|---|---|---|
-| Leaderboard (fomoapi.io) | 308 | 57 | **4** | −14,2 % | 12,3 % | −161.826 $ sobre 22,2 M$ comprados |
-| Relayer (Fase 3) | 220 | 173 | **1** | −13,8 % | 2,9 % | −289.720 $ sobre 3,1 M$ |
+| Leaderboard (fomoapi.io) | 308 | 57 | **4** | −14,2 % (−20,1 % contando los 308) | 12,3 % (16,2 %) | −161.826 $ sobre 22,2 M$ (−3,59 M$ sobre 53,7 M$) |
+| Relayer (Fase 3) | 220 | 173 | **1** | −13,8 % (−14,1 %) | 2,9 % (4,1 %) | −289.720 $ sobre 3,1 M$ (−395.941 $ sobre 4,56 M$) |
 
-- **La leaderboard tampoco gana como grupo en nuestro periodo.** El PnL «de todos los tiempos» que muestra FOMO viene sobre todo de meses anteriores y de posiciones aún sin vender. En los últimos 30 días, operación a operación, la mediana pierde un 14 %.
+Las tres últimas columnas son de los puntuables; entre paréntesis, de todos.
+
+- **La leaderboard tampoco gana como grupo en nuestro periodo.** El PnL «de todos los tiempos» que muestra FOMO viene sobre todo de meses anteriores y de posiciones aún sin vender. En los últimos 30 días, operación a operación, la mediana de los puntuables pierde un 14 %, y la de los 308 un 20 %.
 - **251 no se pueden puntuar:**
   - 154 cierran menos de 20 operaciones en USD en 30 días (muchos operan en las cadenas EVM de FOMO, que no vemos, o mantienen posiciones largas);
   - 89 operan tanto que su historial supera el máximo de 10.000 transacciones;
   - 7 tienen datos incompletos;
   - 1 vende demasiado rápido para copiarle.
-- **Coste:** 169.680 créditos de Helius para importar y poner al día 307 historiales (estimación con la tarifa contrastada en la Fase 3).
+- **Coste:** 169.680 créditos de Helius para importar los 307 historiales y poner al día los de la Fase 3 (estimación con la tarifa contrastada en la Fase 3).
 
 ### 6.3 Los cinco con ventaja
 
@@ -306,11 +308,10 @@ Con reservas:
 
 El enlace que me pasaste es la moneda **«Aura Final Boss» ($Kimchi)**, `Am8iBffq…pump`: creada en pump.fun el 27-jul-2026, con 4,1 M$ de capitalización, 124.000 $ de liquidez y 5.464 holders. Es decir, **es un token, no un trader**.
 
-- **Quién gana con ella.** Siete fichas de la leaderboard la tienen entre sus posiciones principales, con ganancias sin realizar de +11.000 a +44.000 $: @oznek, @elle, @GeofferiChalmers, @bizzxbt, @macdegods, @OmakaseOnly y @pennylane. **Los que más ganan la compraron hace tiempo y la mantienen.** Por ejemplo, @oznek no la ha comprado en los últimos 23 días. Ese movimiento ya pasó y no se puede copiar ahora.
-- **Quién la ha operado hace poco.** Entre el 15 y el 18 de octubre, 15 de las wallets importadas la compraron, algunas con 10.000-25.000 $. **Las que ya vendieron perdieron dinero**:
-  - @rasmr: 25.000 $ → 21.700 $;
-  - @macdegods: 11.500 $ → 9.575 $ (le queda una parte);
-  - @nekomayu: 15.000 $ → 4.795 $.
+- **Quién gana con ella.** Seis fichas de la leaderboard la tienen entre sus posiciones principales, con ganancias sin realizar de +11.000 a +44.000 $: @oznek, @elle, @GeofferiChalmers, @bizzxbt, @macdegods y @OmakaseOnly. @pennylane la compró el 18-oct por unos 5.000 $. **Los que más ganan la compraron hace tiempo y la mantienen.** Por ejemplo, @oznek no la ha comprado en los últimos 23 días. Ese movimiento ya pasó y no se puede copiar ahora.
+- **Quién la ha operado hace poco.** Entre el 15 y el 18 de octubre, 14 de las wallets importadas la compraron, algunas con 10.000-25.000 $. **Entre las que ya vendieron, los resultados son dispares**:
+  - perdieron @rasmr (25.000 $ → 21.700 $) y @nekomayu (15.000 $ → 4.795 $);
+  - ganaron @elle, que cobró 9.543 $ vendiendo una cuarta parte de lo que compró por 10.500 $, y @macdegods, que ha cobrado 9.575 $ de 11.500 $ y aún conserva un tercio.
 
   Otras siguen dentro, como @OmakaseOnly con 21.000 $.
 - **¿Se podría copiar hoy?** Su mercado pasa nuestros filtros: con la cotización real grabada como fixture, comprar y vender 9,60 $ cuesta un 1,3 %. Así que, si un trader seguido la compra, el simulador la copiaría. Los traders que la tienen están en la lista de la prueba en vivo.
@@ -319,15 +320,15 @@ El enlace que me pasaste es la moneda **«Aura Final Boss» ($Kimchi)**, `Am8iBf
 
 | Concepto | Créditos de Helius |
 |---|---|
-| Importar y poner al día 307 historiales de la leaderboard (más la puesta al día de los 221 de la Fase 3) | ≈ 174.500 |
-| Prueba en vivo (monitor, cuentas de tokens) | ≈ 200 por hora con 15-19 wallets |
+| Importar los 307 historiales de la leaderboard y poner al día los 220 de la Fase 3 | 169.680 |
+| Prueba en vivo (monitor, cuentas de tokens) | ≈ 300 por hora con 15-19 wallets (837 en 2 h 42 min) |
 | **Este mes en total** (real del panel hasta el 18-oct + estimación de hoy) | **≈ 260.000 de 1.000.000** |
 
-Jupiter (cotizaciones y precios) y fomoapi.io no han costado nada. Si la simulación corriera todo el mes con unas 20 wallets, el monitor gastaría unos 150.000 créditos: cabe en el plan gratuito.
+Jupiter (cotizaciones y precios) y fomoapi.io no han costado nada. Si la simulación corriera todo el mes con unas 20 wallets, el monitor gastaría unos 200.000-240.000 créditos: cabe en el plan gratuito.
 
 ## 8. Limitaciones y problemas abiertos
 
-1. **Los filtros deciden casi todo.** Con la configuración aprobada no se copió ninguna de 53 compras reales (apartado 5.1). Es correcto según las reglas, pero así no hay muestra. Decidido contigo: en la interfaz (Fase 6) podrás elegir la liquidez mínima (desde 5.000 $) y si se aceptan tokens con comisión cambiable. Los límites de riesgo seguirán fijos.
+1. **Los filtros deciden casi todo.** Con la configuración aprobada no se copió ninguna de 40 compras reales (apartado 5.1). Es correcto según las reglas, pero así no hay muestra. Decidido contigo: en la interfaz (Fase 6) podrás elegir la liquidez mínima (desde 5.000 $) y si se aceptan tokens con comisión cambiable. Los límites de riesgo seguirán fijos.
 2. **Aún no hay ninguna operación simulada en vivo con resultado.** La ejecución está probada con tests sobre cotizaciones simuladas; la lectura de Jupiter y los filtros de mercado, con respuestas reales grabadas; y la cadena completa, en la prueba en vivo de una hora (apartado 5.2). Falta verla funcionar durante días con dinero simulado (Fase 8).
 3. **La prueba en vivo depende de que el proceso esté encendido.** En este entorno de la nube se corta al terminar la sesión. Una prueba de una semana necesita un servidor o un ordenador siempre encendido (Fase 7).
 4. **Valoración congelada si Jupiter falla mucho rato.** La posición conserva su última valoración buena, y el registro del patrimonio guarda su antigüedad. No se pasa a 0 automáticamente para no provocar paradas falsas durante una caída de Jupiter.
@@ -340,7 +341,7 @@ Jupiter (cotizaciones y precios) y fomoapi.io no han costado nada. Si la simulac
 
 ## 9. Conclusión y siguiente paso
 
-**El motor de simulación está terminado, probado y revisado.** Cumple los criterios de aceptación de la Fase 4 de la Fase 1: PnL, costes, slippage, tamaño, stops, caída máxima, pausa automática, rechazo de datos insuficientes, saldos no negativos, sin ventas de más y sin duplicados tras matar el proceso. Sigue en vivo a los traders reales y decide en algo más de un segundo desde su operación.
+**El motor de simulación está terminado, probado y revisado.** Cumple los criterios de aceptación de la Fase 4 de la Fase 1: PnL, costes, slippage, tamaño, stops, caída máxima, pausa automática, rechazo de datos insuficientes, saldos no negativos, sin ventas de más y sin duplicados tras matar el proceso. Detecta en vivo las operaciones de los traders reales en algo más de un segundo y decide en unos 4 s.
 
 **Sobre la rentabilidad todavía no se puede concluir nada**, y los datos que tenemos no invitan al optimismo:
 

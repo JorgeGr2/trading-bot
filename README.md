@@ -90,8 +90,9 @@ uv run copybot sim pause | resume | stop
 ```
 
 Los parámetros del motor se cambian con variables `COPYBOT_SIM_*` (latencia, slippage,
-stop-loss…) y los de los filtros con `COPYBOT_SAFETY_*`; los límites de riesgo
-(`COPYBOT_RISK_*`) solo pueden endurecerse.
+stop-loss…) y los de los filtros con `COPYBOT_SAFETY_*`, en el entorno o en `.env`. Los
+límites de riesgo (`COPYBOT_RISK_*`) solo pueden endurecerse. Una variable `COPYBOT_*`
+desconocida (por ejemplo, con una errata) impide arrancar.
 
 El fichero de `discover add --file` tiene una wallet por línea: `dirección` o
 `dirección, etiqueta`. Para medir a 90 días: `COPYBOT_SCORING_WINDOW_DAYS=90`.

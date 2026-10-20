@@ -62,9 +62,9 @@ Las ventas siguen el mismo proceso. Sin ruta de venta, la posición se marca **i
 | Estado | Entradas de la cartera | Entradas del libro de señales | Salidas | Cómo se entra y se sale |
 |---|---|---|---|---|
 | `RECOVERING` | No | No | — | Al arrancar: las órdenes a medias se dan por no ejecutadas |
-| `RUNNING` | Sí | Sí | Sí | Tras recuperar, o con `copybot sim resume` |
+| `RUNNING` | Sí | Sí | Sí | En cuanto el monitor da datos, o con `copybot sim resume` |
 | `PAUSED` | No | No | Sí | `copybot sim pause` |
-| `READ_ONLY` | No | No | Sí | Automático si el monitor deja de latir (30 s) o su WebSocket se desconecta; vuelve solo |
+| `READ_ONLY` | No | No | Sí | Al arrancar, hasta que el monitor da datos. Automático si deja de latir (30 s) o su WebSocket se desconecta. Vuelve a `RUNNING` solo |
 | `HALTED_RISK` | No | Sí | Sí | Automático al superar la pérdida diaria o la caída máxima. `resume` (o reiniciar) solo vuelve a `RUNNING` si ya no se superan |
 | `STOPPED` | — | — | — | `copybot sim stop` o al terminar `sim run` |
 
@@ -74,7 +74,7 @@ Las ventas siguen el mismo proceso. Sin ruta de venta, la posición se marca **i
 2. **Atomicidad.** Estado del sistema (bloqueado para lectura), límites de riesgo, orden y reserva de efectivo se resuelven en la misma transacción, con la caja bloqueada. Dos señales simultáneas no pueden superar los límites (probado con 8 a la vez).
 3. **Sin saldos negativos ni ventas de más.** Restricciones `CHECK`: efectivo y reserva ≥ 0, cantidades ≥ 0, una posición cerrada está vacía. Una venta nunca supera lo que hay.
 4. **Doble entrada exacta.** Los apuntes de cada operación suman cero, redondeados a la escala de las columnas antes de guardarse. Mientras una posición está abierta, sus apuntes suman su coste más la renta; al cerrarla, cero.
-5. **Un solo motor a la vez** (bloqueo de PostgreSQL).
+5. **Un solo motor a la vez** (bloqueo de PostgreSQL, comprobado en cada vuelta).
 6. **Matar el proceso a mitad de una orden** no duplica nada: al arrancar, la orden se da por no ejecutada, se libera la reserva y la señal no se vuelve a decidir.
 7. **Solo simulación.** No hay claves, firma ni envío. El test de «solo simulación» prohíbe en el código cualquier forma de construir o firmar transacciones (incluidos los endpoints de Jupiter que las construyen).
 
@@ -137,6 +137,17 @@ Antes de cerrar la fase pedí una revisión independiente con varios agentes. Ca
 | Media | Los límites endurecidos en `.env` (`COPYBOT_RISK_*`) se ignoraban | Se leen de `.env`; una errata en el nombre es un error |
 | Media | Pasaba un token con comisión de transferencia del 0 % que el creador puede subir, y un hook de transferencia que el creador puede activar más tarde | Se rechazan |
 | Baja | Varios detalles de realismo: el MEV no contaba para el límite de slippage, la venta sin respuesta de Jupiter en t3 no pagaba comisión, la fracción vendida por el trader podía calcularse con un historial incompleto, los reintentos vendían la copia teórica a nuestro precio… | Corregidos uno a uno |
+
+**Segunda revisión.** Después repetí la revisión solo sobre esas correcciones, por si alguna había introducido un fallo nuevo. Se confirmaron **11** problemas (5 de gravedad media y 6 baja) y se refutaron 3. Todos están corregidos, con su test:
+
+- el motor aguanta un corte breve de PostgreSQL y reintenta, cada vez más espaciado;
+- las órdenes que un error deja a medias se recuperan en la vuelta siguiente, no solo al reiniciar;
+- el bloqueo de un solo motor detecta si se ha perdido;
+- al arrancar se espera en solo lectura hasta que el monitor da datos, sin un aviso falso;
+- el MEV se lleva como mucho hasta el mínimo de la transacción: antes, con una tolerancia menor que el MEV, fallaban todas las órdenes;
+- el redondeo ya no falla con tokens muy baratos;
+- en el informe, una posición invendible que ya había ganado cuenta como acierto, y cada comisión fallida se atribuye a su posición;
+- una variable `COPYBOT_*` desconocida, por ejemplo con una errata, impide arrancar.
 
 Lo que queda abierto está en el apartado 8.
 

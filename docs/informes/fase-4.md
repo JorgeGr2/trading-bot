@@ -6,7 +6,22 @@
 
 ## 1. Resumen
 
-<!-- RESUMEN -->
+- **El motor de simulación está terminado.**
+  - Copia en vivo las compras y ventas de los traders seguidos con cotizaciones reales de Jupiter, latencia, slippage, MEV, comisiones y renta.
+  - Lleva dos libros: la cartera de 100 $ con todos los límites de riesgo y un libro que copia cada señal con 10 $.
+  - Se para solo por pérdidas y pasa a solo lectura si el monitor deja de dar datos.
+- **Cumple todos los criterios de aceptación de la Fase 4** fijados en la Fase 1. Lo prueban 267 tests en verde: PnL y costes exactos, slippage, tamaño, stops, caída máxima y pausa automática, rechazo por datos insuficientes, saldos nunca negativos, nunca vende más de lo que tiene, y no duplica nada tras matar el proceso a mitad de una orden.
+- **Dos revisiones adversariales independientes** encontraron 45 problemas reales (34 + 11), todos corregidos con test. Los más graves: un descuadre del diario por redondeo, órdenes que se podían quedar a medias, el valor de una posición tras una venta parcial, y caminos para saltarse la parada por riesgo.
+- **En vivo:**
+  - detecta las operaciones en **1,0 s** (mediana) y decide en **2,3 s**;
+  - con la configuración aprobada no copió ninguna de 53 compras en 2 horas (por los filtros);
+  - con dos filtros relajados copió 5 y comprobó toda la cadena;
+  - en el token más operado, comprar y vender a la vez cuesta un **6,4 %**.
+- **Leaderboard y Kimchi:**
+  - he analizado **308 traders** de la leaderboard de FOMO (fomoapi.io); como grupo pierden: −14 % de mediana por operación en 30 días;
+  - **5 de 230 traders puntuables** tienen ventaja después del coste de copiar: A9aqAHUX, @nekomayu, @OinkersRUs, @kecoseh y @Washedupke3d;
+  - **Kimchi es un token**, no un trader: lo ganaron quienes lo compraron hace meses, y quienes lo han operado esta semana y ya vendieron perdieron.
+- **Nada demuestra todavía que copiar sea rentable.** Eso solo lo dirán el backtester (Fase 5) y una prueba larga en vivo (Fase 8).
 
 ## 2. Qué se ha construido
 
@@ -181,7 +196,42 @@ Los filtros funcionaron como están definidos, pero con estos traders son lo que
 
 **Interrupción.** La prueba duró sus 120 minutos, pero la sesión de trabajo se congeló al llegar al límite de uso justo al terminar. El proceso no llegó a marcar `STOPPED` y quedó en `RUNNING`. Es justo el caso que cubre la recuperación al arrancar. Una prueba de 1 minuto repetida después sale limpia en 62 s y deja `STOPPED`.
 
-<!-- RELAJADA -->
+### 5.2 Prueba de ejecución con filtros relajados (20-oct, 07:05-08:05 UTC)
+
+Su objetivo era ver funcionar la parte de compras, valoración y contabilidad con cotizaciones reales, que con los filtros estrictos no llegó a usarse. Se hizo en **una base de datos aparte** (`copybot_relajada`), con dos filtros relajados solo para esta prueba:
+
+- liquidez mínima de 5.000 $;
+- aceptar tokens cuya comisión de transferencia el creador puede cambiar.
+
+La configuración aprobada no cambia. Se siguieron 30 traders (los 19 anteriores y los 11 más activos de las fichas públicas), a una hora de poca actividad.
+
+| Medida | Resultado |
+|---|---|
+| Señales | 9 (5 compras y 4 ventas) en 60 minutos |
+| Compras copiadas | **5 ejecuciones**: 2 en la cartera y 3 en el libro de señales |
+| Rechazos | 2 compras por impacto > 3 % (3,16 % y 4,39 %); 1 por tener ya posición en el token; 4 ventas sin posición copiada |
+| Tiempo hasta decidir | **2,0-2,8 s** desde el bloque del trader (media 2,3 s) |
+| De la cotización t2 a la t3 | 2,3-2,4 s (1,5 s de latencia simulada y el tiempo de las cotizaciones) |
+| Precio conseguido | 0,001813 $ por token frente a 0,001820 $ del trader (*Elon Coin*): prácticamente el mismo |
+| Coste de comprar y vender a la vez (ese token) | **6,4 %**: impacto, rutas de tres saltos y el 1 % de comisión de transferencia en cada sentido |
+| Resultado al cerrar la prueba | Cartera 100,81 $ (+0,8 %, sin realizar); libro de señales +1,55 $ sin realizar. Mantener SOL: −0,63 $ |
+| Cierre | Limpio: estado `STOPPED` a las 08:05:16 y salida con código 0 |
+
+Las rutas reales de Jupiter fueron de tres saltos (Kipseli/BisonFi → Meteora DLMM → Raydium CP). Al cerrar la prueba quedan abiertas dos posiciones en cada libro: *Elon Coin* (de @surgz) y un token comprado a las 08:05 por la wallet `GYQ4…` de la Fase 3. Con una hora de prueba no hubo ventas copiadas. Las ventas, el stop-loss y el tiempo máximo están probados con tests, pero falta verlos en una prueba larga (Fase 8).
+
+**Conclusión de la prueba:** la cadena completa funciona con datos reales:
+
+1. detección en vivo;
+2. señal;
+3. filtros del token y del mercado;
+4. límites de riesgo;
+5. cotización t2, latencia y cotización t3;
+6. compra con comisión y renta;
+7. diario;
+8. valoración cada minuto;
+9. informe y parada ordenada.
+
+Y lo hace en unos 2,3 s desde la operación del trader. **El coste real de copiar es alto en estos tokens**: un 6,4 % de ida y vuelta en el único token con varias operaciones. Cada operación copiada necesita subir más que eso para ganar dinero.
 
 ## 6. Leaderboard de FOMO y Kimchi
 

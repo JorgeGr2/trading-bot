@@ -29,6 +29,16 @@ from copybot.sim.store import PORTFOLIO, SIGNALS, SimStore, idempotency_key
 
 pytestmark = pytest.mark.postgres
 
+# Perfil conservador (el de la Fase 1): los tests de la lógica de riesgo lo usan para
+# que sus cifras no dependan del perfil por defecto. Es más estricto que los topes.
+CONSERVATIVE = RiskLimits(
+    max_position_usd=10,
+    max_open_positions=5,
+    min_cash_reserve_pct=20,
+    max_daily_loss_pct=10,
+    max_drawdown_pct=25,
+)
+
 NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 TRADER = "Trader1111111111111111111111111111111111111"
 OTHER = "Other11111111111111111111111111111111111111"
@@ -141,7 +151,7 @@ async def entry(store: SimStore, sig: Signal, book: str = PORTFOLIO, size: str =
         key=idempotency_key(book, sig.id, "entry"),
         size=Decimal(size),
         decision={"tamaño": Decimal(size)},
-        limits=RiskLimits() if book == PORTFOLIO else None,
+        limits=CONSERVATIVE if book == PORTFOLIO else None,
         allowed_states=RUNNING,
     )
 
@@ -263,7 +273,7 @@ async def test_risk_limits_with_concurrent_entries(store, engine):
     sigs = [await signal(store, engine, i) for i in range(1, 9)]
     results = await asyncio.gather(*(entry(store, s) for s in sigs))
     accepted = [r for r in results if r.accepted]
-    assert len(accepted) == RiskLimits().max_open_positions
+    assert len(accepted) == CONSERVATIVE.max_open_positions
     assert all("posiciones abiertas" in r.reasons[0] for r in results if not r.accepted)
     row = await cash(engine)
     assert row.cash_usd == 50 and row.reserved_usd == 50

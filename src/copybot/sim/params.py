@@ -8,7 +8,7 @@ from decimal import Decimal
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
-from copybot.config import GroupSettings
+from copybot.config import MAX_POSITION_USD, GroupSettings
 
 
 class EngineParams(GroupSettings):
@@ -28,8 +28,9 @@ class EngineParams(GroupSettings):
     mev_haircut_bps: int = Field(default=50, ge=0, le=2000)
     base_fee_lamports: int = Field(default=5_000, ge=0)
     priority_fee_lamports: int = Field(default=100_000, ge=0)
-    # Tamaño fijo de cada operación en el libro de señales (sin límite de capital).
-    signal_book_size_usd: Decimal = Field(default=Decimal(10), gt=0, le=10)
+    # Tamaño fijo de cada operación en el libro de señales (sin límite de capital). Por
+    # defecto, el mismo que la cartera: así ambos libros comparten la ejecución.
+    signal_book_size_usd: Decimal = Field(default=MAX_POSITION_USD, gt=0, le=MAX_POSITION_USD)
     stop_loss_pct: Decimal = Field(default=Decimal(50), gt=0, le=100)
     max_hold_hours: Decimal = Field(default=Decimal(48), gt=0, le=24 * 30)
     # Si tras una venta queda menos de esta fracción, se vende todo.

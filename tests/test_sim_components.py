@@ -29,7 +29,14 @@ from copybot.solana.constants import USDC_MINT
 D = Decimal
 NOW = datetime(2026, 10, 18, 20, tzinfo=UTC)
 MINTS = Path(__file__).parent / "fixtures" / "mints"
-LIMITS = RiskLimits()
+# Perfil conservador (el de la Fase 1), más estricto que los topes actuales.
+LIMITS = RiskLimits(
+    max_position_usd=10,
+    max_open_positions=5,
+    min_cash_reserve_pct=20,
+    max_daily_loss_pct=10,
+    max_drawdown_pct=25,
+)
 SAFETY = SafetyParams(_env_file=None)
 MEME = "GTBxUiw6wJdmmkCGZgRHLyYxqu1vG4KtRpeox6yDpump"
 

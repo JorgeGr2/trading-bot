@@ -15,11 +15,12 @@ from copybot.config import (
 def test_defaults_are_the_agreed_limits():
     limits = RiskLimits()
     assert limits.virtual_capital_usd == Decimal("100")
-    assert limits.max_position_usd == Decimal("10")
-    assert limits.max_open_positions == 5
-    assert limits.min_cash_reserve_pct == Decimal("20")
-    assert limits.max_daily_loss_pct == Decimal("10")
-    assert limits.max_drawdown_pct == Decimal("25")
+    # Perfil agresivo decidido el 20-oct-2026.
+    assert limits.max_position_usd == Decimal("25")
+    assert limits.max_open_positions == 8
+    assert limits.min_cash_reserve_pct == Decimal("10")
+    assert limits.max_daily_loss_pct == Decimal("20")
+    assert limits.max_drawdown_pct == Decimal("50")
 
 
 @pytest.mark.parametrize(
@@ -27,11 +28,11 @@ def test_defaults_are_the_agreed_limits():
     [
         ("virtual_capital_usd", "100.01"),
         ("virtual_capital_usd", "0"),
-        ("max_position_usd", "10.5"),
-        ("max_open_positions", 6),
-        ("min_cash_reserve_pct", "19.99"),
-        ("max_daily_loss_pct", "11"),
-        ("max_drawdown_pct", "30"),
+        ("max_position_usd", "25.01"),
+        ("max_open_positions", 9),
+        ("min_cash_reserve_pct", "9.99"),
+        ("max_daily_loss_pct", "21"),
+        ("max_drawdown_pct", "51"),
     ],
 )
 def test_limits_cannot_be_relaxed(field, value):

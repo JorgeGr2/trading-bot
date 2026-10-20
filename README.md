@@ -91,7 +91,9 @@ uv run copybot sim pause | resume | stop
 
 Los parámetros del motor se cambian con variables `COPYBOT_SIM_*` (latencia, slippage,
 stop-loss…) y los de los filtros con `COPYBOT_SAFETY_*`, en el entorno o en `.env`. Los
-límites de riesgo (`COPYBOT_RISK_*`) solo pueden endurecerse. Una variable `COPYBOT_*`
+límites de riesgo (`COPYBOT_RISK_*`) solo pueden endurecerse. Por defecto se usa el
+perfil agresivo decidido en la Fase 4: 25 $ por posición, hasta 8 posiciones, 10 % de
+reserva, 20 % de pérdida diaria y 50 % de caída máxima. Una variable `COPYBOT_*`
 desconocida (por ejemplo, con una errata) impide arrancar.
 
 El fichero de `discover add --file` tiene una wallet por línea: `dirección` o

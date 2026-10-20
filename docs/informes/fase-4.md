@@ -8,7 +8,8 @@
 
 - **El motor de simulación está terminado.**
   - Copia en vivo las compras y ventas de los traders seguidos con cotizaciones reales de Jupiter, latencia, slippage, MEV, comisiones y renta.
-  - Lleva dos libros: la cartera de 100 $ con todos los límites de riesgo y un libro que copia cada señal con 10 $.
+  - Lleva dos libros: la cartera de 100 $ con todos los límites de riesgo y un libro que copia cada señal con el mismo tamaño.
+  - **Perfil de riesgo agresivo, por tu decisión del 20-oct:** 25 $ por posición, hasta 8 posiciones, 10 % de reserva, 20 % de pérdida diaria y 50 % de caída máxima (antes, 10 $, 5, 20 %, 10 % y 25 %). Las pruebas en vivo de este informe se hicieron con el perfil anterior, de 10 $.
   - Se para solo por pérdidas y pasa a solo lectura si el monitor deja de dar datos.
 - **Cumple todos los criterios de aceptación de la Fase 4** fijados en la Fase 1. Lo prueban 267 tests en verde: PnL y costes exactos, slippage, tamaño, stops, caída máxima y pausa automática, rechazo por datos insuficientes, saldos nunca negativos, nunca vende más de lo que tiene, y no duplica nada tras matar el proceso a mitad de una orden.
 - **Dos revisiones adversariales independientes** encontraron 45 problemas reales (34 + 11), todos corregidos con test. Los más graves: un descuadre del diario por redondeo, órdenes que se podían quedar a medias, el valor de una posición tras una venta parcial, y caminos para saltarse la parada por riesgo.
@@ -48,7 +49,13 @@ Para cada **compra** de un trader seguido (detectada en vivo y clasificada con c
 3. **Token** (cuenta on-chain, en caché 30 min). Se rechaza si el creador puede emitir más tokens o congelar saldos, si tiene extensiones de Token-2022 que permiten bloquear o quitar los tokens (hook de transferencia, delegado permanente, intransferible, pausa, cuentas congeladas por defecto), si cobra más de un 1 % por transferencia o si el creador puede subir esa comisión.
 4. **Estado del sistema.** La cartera solo compra en `RUNNING`. El libro de señales también en `HALTED_RISK`, para seguir midiendo.
 5. **Mercado** (Jupiter). Liquidez ≥ 20.000 $, impacto de nuestra compra ≤ 3 % y pérdida de comprar y vender a la vez ≤ 10 % (detecta tokens que no se pueden vender).
-6. **Riesgo y reserva** (solo la cartera), en **una sola transacción** con la caja bloqueada: pérdida del día < 10 %, caída desde el máximo < 25 %, como mucho 5 posiciones (las compras en curso cuentan), una por token y un 20 % del capital siempre en reserva. Si pasa, se crea la orden y se reservan los 10 $.
+6. **Riesgo y reserva** (solo la cartera), en **una sola transacción** con la caja bloqueada. Con el perfil agresivo actual (apartado 2.6) se exige:
+   - pérdida del día < 20 %;
+   - caída desde el máximo < 50 %;
+   - como mucho 8 posiciones (las compras en curso cuentan) y una por token;
+   - un 10 % del capital siempre en reserva.
+
+   Si pasa, se crea la orden y se reservan los 25 $ (con el perfil anterior: 10 %, 25 %, 5 posiciones, 20 % y 10 $).
 7. **Ejecución simulada** (apartado 2.2).
 
 Para cada **venta** del trader: si tenemos su posición copiada, vendemos **la misma fracción** que él (calculada con los saldos de su propia transacción), y todo si deja menos de un 2 %. Además, cada minuto se valora cada posición con una cotización de venta real y se vende si **pierde un 50 %** o lleva **48 h** abierta. Las ventas que fallan se reintentan, cada vez más espaciadas. Las salidas funcionan también en pausa, en solo lectura y tras una parada por riesgo: reducen riesgo.
@@ -57,7 +64,7 @@ Cada decisión, también los rechazos, queda guardada con sus motivos y los dato
 
 ### 2.2 Ejecución simulada (apartado 6.1 de la Fase 1)
 
-1. **t2**: cotización de Jupiter para **nuestro** tamaño. Los 10 $ lo incluyen todo: se compra por 10 $ menos la comisión de red y la renta de la cuenta de token.
+1. **t2**: cotización de Jupiter para **nuestro** tamaño. El tamaño de la posición (25 $; 10 $ con el perfil anterior) lo incluye todo: se compra por ese importe menos la comisión de red y la renta de la cuenta de token.
 2. **Latencia**: se **espera de verdad** 1,5 s (configurable).
 3. **t3**: se vuelve a cotizar y se aplica un recorte supuesto del 0,5 % por MEV (*sandwich*). Si lo recibido queda más de un 3 % por debajo de t2, la orden **falla** como fallaría on-chain y **se paga la comisión**. Si Jupiter no responde en t3, también falla y paga.
 4. Se descuenta la comisión de transferencia del token, si la tiene.
@@ -68,7 +75,7 @@ Las ventas siguen el mismo proceso. Sin ruta de venta, la posición se marca **i
 ### 2.3 Dos libros y comparaciones
 
 - **Cartera (100 $)**: lo que habría pasado de verdad, con todos los límites.
-- **Libro de señales**: copia **cada** compra con 10 $, sin límite de capital ni de posiciones. Sirve para tener muestra suficiente con la que medir a cada trader aunque la cartera esté llena o parada.
+- **Libro de señales**: copia **cada** compra con el mismo tamaño que la cartera (25 $ por defecto), sin límite de capital ni de posiciones. Sirve para tener muestra suficiente con la que medir a cada trader aunque la cartera esté llena o parada.
 - **Comparaciones** (`copybot sim report`): copia realista frente a **copia teórica** (las mismas operaciones al precio exacto del trader y sin costes, sobre las mismas posiciones), **no operar** y **mantener SOL**. Por trader, resultado real frente a teórico. La diferencia es lo que se come la ejecución.
 - **Estadística**: resultado realizado y sin realizar, acierto, profit factor, comisiones por operación y **aviso de muestra insuficiente** (menos de 30 operaciones con resultado; aviso más suave por debajo de 100). Las posiciones invendibles cuentan como pérdida total, para no caer en el sesgo de supervivencia.
 
@@ -93,7 +100,24 @@ Las ventas siguen el mismo proceso. Sin ruta de venta, la posición se marca **i
 6. **Matar el proceso a mitad de una orden** no duplica nada: al arrancar, la orden se da por no ejecutada, se libera la reserva y la señal no se vuelve a decidir.
 7. **Solo simulación.** No hay claves, firma ni envío. El test de «solo simulación» prohíbe en el código cualquier forma de construir o firmar transacciones (incluidos los endpoints de Jupiter que las construyen).
 
-### 2.6 Cambios en la base de datos
+### 2.6 Perfil de riesgo agresivo (decidido el 20-oct)
+
+Pediste que el bot asuma **más riesgo si eso da más beneficio**, y elegiste subir ya los topes de la simulación. Los nuevos topes están fijados en el código y, como antes, desde la configuración solo se pueden endurecer:
+
+| Límite | Fase 1 | Ahora (por defecto) |
+|---|---|---|
+| Capital virtual | 100 $ | 100 $ |
+| Tamaño por posición | 10 $ | **25 $** (también en el libro de señales) |
+| Posiciones abiertas a la vez | 5 | **8** |
+| Reserva de efectivo | 20 % | **10 %** |
+| Pérdida diaria que para la cartera | 10 % | **20 %** |
+| Caída máxima que para la cartera | 25 % | **50 %** |
+
+Con 100 $, posiciones de 25 $ y un 10 % de reserva, **caben como mucho 3 posiciones a la vez**: el límite de 8 solo cuenta con posiciones más pequeñas. Más tamaño por operación también significa más impacto en el precio y más coste al copiar en tokens con poca liquidez.
+
+Ten en cuenta que **más riesgo amplifica el resultado en los dos sentidos**: con un trader con ventaja real, más ganancia; con uno sin ella, que son la gran mayoría según la Fase 3 y la leaderboard, se pierde más deprisa. El backtester (Fase 5) comparará este perfil con el anterior con los mismos traders y costes. El dinero real sigue exigiendo los criterios de la Fase 1, apartado 12; si se llega a la Fase 9, estos topes se revisarán con los resultados.
+
+### 2.7 Cambios en la base de datos
 
 | Tabla | Contenido |
 |---|---|
@@ -122,9 +146,9 @@ Los tests que usan base de datos se ejecutan contra PostgreSQL 16 real. Los del 
 |---|---|
 | **PnL y costes** | Una compra con todos los costes calculados a mano (comisión de red y prioritaria, renta, impacto, MEV) y el efectivo que queda. Venta proporcional y cierre con la renta devuelta. Resultado realizado exacto. Diario cuadrado incluso con precios de SOL de muchos decimales |
 | **Slippage** | Si el precio se mueve más de un 3 % durante la latencia, la orden falla y paga la comisión. El MEV cuenta para ese límite. Si Jupiter no responde en t3, también falla y paga |
-| **Tamaño de posición** | Los 10 $ incluyen comisión y renta. Redondeo hacia abajo |
+| **Tamaño de posición** | El tamaño incluye comisión y renta. Redondeo hacia abajo. Con el perfil agresivo, 25 $ por posición y como mucho 3 a la vez por la reserva del 10 % |
 | **Stops** | Stop-loss al 50 %, venta a las 48 h. El stop-loss sigue vigilando aunque haya fallado una venta parcial copiada |
-| **Caída máxima y pérdida diaria (pausa automática)** | Al caer más de un 25 %, `HALTED_RISK`: la cartera deja de comprar y el libro de señales sigue. Ni forzar `RUNNING`, ni `stop` + `run`, ni reiniciar se lo saltan |
+| **Caída máxima y pérdida diaria (pausa automática)** | Al superar el límite, `HALTED_RISK`: la cartera deja de comprar y el libro de señales sigue. Ni forzar `RUNNING`, ni `stop` + `run`, ni reiniciar se lo saltan. Probado con el perfil anterior y con el agresivo (una pérdida del 12 % ya no para; una del 45 % sí) |
 | **Datos insuficientes o incoherentes** | Señal vieja o recuperada sin hora de bloque, token ilegible, sin precio de SOL (o de hace más de 10 min), Jupiter caído o con respuestas raras: se rechaza con su motivo |
 | **Saldos no negativos** | La base de datos rechaza un efectivo negativo (restricción `CHECK`) |
 | **Sin ventas superiores a la posición** | Pedir vender 10 veces lo que hay solo vende lo que hay y cierra |

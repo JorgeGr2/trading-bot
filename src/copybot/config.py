@@ -20,13 +20,19 @@ from pydantic_settings import (
 
 # --- Topes duros ---------------------------------------------------------------
 # Cambiar cualquiera de estos valores exige modificar el código y pasar revisión.
+#
+# Perfil agresivo de la simulación, por decisión del propietario (20-oct-2026: «asumir
+# más riesgo si eso da más beneficio»). Antes: 10 $ por posición, 5 posiciones, 20 % de
+# reserva, 10 % de pérdida diaria y 25 % de caída. Con 100 $ y 25 $ por posición, la
+# reserva del 10 % deja como mucho 3 posiciones de 25 $ abiertas a la vez. Un posible
+# modo con dinero real (Fase 9) volverá a revisar estos topes con los resultados.
 
 MAX_VIRTUAL_CAPITAL_USD = Decimal("100")
-MAX_POSITION_USD = Decimal("10")
-MAX_OPEN_POSITIONS = 5
-MIN_CASH_RESERVE_PCT = Decimal("20")
-MAX_DAILY_LOSS_PCT = Decimal("10")
-MAX_DRAWDOWN_PCT = Decimal("25")
+MAX_POSITION_USD = Decimal("25")
+MAX_OPEN_POSITIONS = 8
+MIN_CASH_RESERVE_PCT = Decimal("10")
+MAX_DAILY_LOSS_PCT = Decimal("20")
+MAX_DRAWDOWN_PCT = Decimal("50")
 MAX_MONTHLY_BUDGET_USD = Decimal("50")
 
 

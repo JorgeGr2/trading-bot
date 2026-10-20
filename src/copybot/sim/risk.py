@@ -1,8 +1,8 @@
 """Límites de riesgo de la cartera (funciones puras).
 
 Los límites salen de ``RiskLimits`` (topados en el código y que solo pueden
-endurecerse): 10 $ por posición, 5 posiciones, 20 % de reserva, pérdida diaria del 10 %
-y caída máxima del 25 %.
+endurecerse). Perfil agresivo por defecto: 25 $ por posición, 8 posiciones, 10 % de
+reserva, pérdida diaria del 20 % y caída máxima del 50 %.
 """
 
 from __future__ import annotations

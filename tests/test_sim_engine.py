@@ -33,6 +33,16 @@ from copybot.solana.constants import USDC_MINT
 
 pytestmark = pytest.mark.postgres
 
+# Perfil conservador (el de la Fase 1): los tests de la lógica de riesgo lo usan para
+# que sus cifras no dependan del perfil por defecto. Es más estricto que los topes.
+CONSERVATIVE = RiskLimits(
+    max_position_usd=10,
+    max_open_positions=5,
+    min_cash_reserve_pct=20,
+    max_daily_loss_pct=10,
+    max_drawdown_pct=25,
+)
+
 T0 = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 TRADER = "Trader1111111111111111111111111111111111111"
 
@@ -122,7 +132,7 @@ class World:
 
     def build(self, **params) -> Engine:
         store = SimStore(self.sessions, clock=self.clock)
-        p = EngineParams(**params)
+        p = EngineParams(**({"signal_book_size_usd": Decimal(10)} | params))
         executor = SimExecutor(
             self.quotes,
             latency_ms=p.latency_ms,
@@ -136,7 +146,7 @@ class World:
             executor,
             params=p,
             safety=SafetyParams(),
-            limits=RiskLimits(),
+            limits=CONSERVATIVE,
             clock=self.clock,
             sleep=self.latency,
         )
@@ -394,7 +404,7 @@ async def test_position_limit_applies_to_portfolio_only(world):
     assert len(rejected) == 2 and "posiciones abiertas" in rejected[0].status_reason
     assert len(await world.positions(SIGNALS)) == 7
     cash = await world.cash()
-    assert cash.cash_usd >= Decimal(100) * RiskLimits().min_cash_reserve_pct / 100
+    assert cash.cash_usd >= Decimal(100) * CONSERVATIVE.min_cash_reserve_pct / 100
 
 
 async def test_drawdown_halts_portfolio_but_signals_book_keeps_measuring(world):
@@ -778,3 +788,36 @@ async def test_unsellable_position_that_already_won_counts_as_a_win(world):
     report = await build_report(world.sessions, world.clock())
     signals = report.books[SIGNALS]
     assert signals.written_off == 1 and signals.wins == 1 and signals.gross_loss_usd == 0
+
+
+async def test_aggressive_default_profile(world):
+    """Perfil por defecto (20-oct-2026): 25 $ por posición, 10 % de reserva (con 100 $
+    caben 3 posiciones de 25 $) y parada con una pérdida diaria del 20 %, no del 10 %."""
+    eng = world.build(signal_book_size_usd=Decimal(25), stop_loss_pct=Decimal(100))
+    eng.limits = RiskLimits()
+    await eng.start()
+    for i in range(1, 6):
+        await world.trade("buy", world.token(i), "50000", "500")
+    await eng.tick()
+    portfolio = await world.orders(book=PORTFOLIO, purpose="entry")
+    assert sum(o.status == "filled" for o in portfolio) == 3
+    assert all(o.requested_usd == 25 for o in portfolio)
+    assert "reserva" in next(o for o in portfolio if o.status == "rejected").status_reason
+    assert len(await world.positions(SIGNALS)) == 5  # el libro de señales, con 25 $ cada una
+
+    for i in range(1, 6):
+        # −15 %: la cartera pierde algo más de un 10 % (pararía con el perfil anterior),
+        # pero menos del 20 % diario del perfil agresivo.
+        world.quotes.price[mint(i)] = Decimal("0.0085")
+    world.clock.advance(seconds=61)
+    await world.heartbeat()
+    await eng.tick()
+    state = await eng.store.book_state(PORTFOLIO)
+    assert Decimal(80) < state.equity_usd < Decimal(90)
+    assert (await eng.store.state()).state == "RUNNING"
+    for i in range(1, 6):
+        world.quotes.price[mint(i)] = Decimal("0.001")  # −90 %: supera los límites
+    world.clock.advance(seconds=61)
+    await world.heartbeat()
+    await eng.tick()
+    assert (await eng.store.state()).state == "HALTED_RISK"

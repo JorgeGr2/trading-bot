@@ -142,7 +142,35 @@ Lo que queda abierto está en el apartado 8.
 
 ## 5. Prueba en vivo con datos reales
 
-<!-- EN VIVO -->
+### 5.1 Con la configuración aprobada (19-oct, 18:28-20:28 UTC)
+
+`copybot sim run --minutes 120`, con el código ya corregido, siguiendo 19 wallets:
+
+- `A9aqAHUX…`, el candidato de la Fase 3, y otra wallet puntuada en esa fase;
+- los cuatro traders puntuables de la leaderboard (@nekomayu, @OinkersRUs, @kecoseh, @Washedupke3d);
+- seis que tienen Kimchi;
+- siete de los mejores de las últimas 24 h.
+
+| Medida | Resultado |
+|---|---|
+| Compraventas detectadas en vivo | 143 transacciones; 67 señales (53 compras y 14 ventas) |
+| **Latencia de detección** (bloque → señal) | **mediana 1,0 s, percentil 95 1,5 s** |
+| Huecos recuperados / errores del proveedor | 2 transacciones recuperadas, 0 errores; 4 desconexiones del WebSocket, todas recuperadas solas |
+| Compras copiadas | **0**: las 53 se rechazaron por los filtros (abajo) |
+| Ventas | 14, ninguna con posición copiada |
+| Estado | `RUNNING` todo el tiempo, salvo unos segundos en `READ_ONLY` al arrancar, mientras el WebSocket se conectaba (comportamiento esperado) |
+| Registros del patrimonio | 161, uno por minuto, con el precio de SOL |
+
+**¿Por qué no se copió nada?**
+
+- **42 de las 53 compras eran del mismo token**: *Elon Coin* (`B2GESk…`), recomprado una y otra vez por @surgz (35), @bigbabba (4) e @Iri0o (3). Cobra un 1 % por transferencia y su creador conserva la autoridad para cambiarlo, así que el filtro lo rechaza.
+- **Las otras 11 eran de tokens con 4.000-19.700 $ de liquidez**, por debajo del mínimo de 20.000 $. Uno además cobraba un 3 % por transferencia.
+
+Los filtros funcionaron como están definidos, pero con estos traders son lo que decide. Lo he comprobado en la cadena: en Token-2022, si el creador sube la comisión, el cambio no entra en vigor hasta **dos épocas después** (unos 4-5 días) y queda visible en la propia cuenta como «nueva comisión». Como nuestras posiciones duran como mucho 48 h y el filtro ya mira la comisión nueva programada, **la regla «el creador puede subir la comisión» se podría relajar sin riesgo real**. Lo dejo como decisión tuya (apartado 9).
+
+**Interrupción.** La prueba duró sus 120 minutos, pero la sesión de trabajo se congeló al llegar al límite de uso justo al terminar. El proceso no llegó a marcar `STOPPED` y quedó en `RUNNING`. Es justo el caso que cubre la recuperación al arrancar. Una prueba de 1 minuto repetida después sale limpia en 62 s y deja `STOPPED`.
+
+<!-- RELAJADA -->
 
 ## 6. Leaderboard de FOMO y Kimchi
 

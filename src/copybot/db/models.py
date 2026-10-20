@@ -565,3 +565,47 @@ class ServiceHeartbeat(Base):
     service: Mapped[str] = mapped_column(String(40), primary_key=True)
     beat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+
+# --- Fase 5: backtester ------------------------------------------------------------------
+
+
+class DelayedPrice(Base):
+    """Precio al que se operaba un token unos segundos después de un instante dado,
+    sacado de las operaciones reales de otros (para copiar con retraso en el backtest).
+
+    Es una caché: el backtest se repite sin volver a gastar créditos y da siempre lo mismo.
+    """
+
+    __tablename__ = "backtest_delayed_prices"
+
+    mint: Mapped[str] = mapped_column(ADDRESS, primary_key=True)
+    at: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # segundos Unix
+    delay_from: Mapped[int] = mapped_column(Integer, primary_key=True)  # segundos después
+    delay_to: Mapped[int] = mapped_column(Integer, primary_key=True)
+    price_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)  # None: no hubo operaciones
+    swaps: Mapped[int] = mapped_column(Integer)  # operaciones usadas
+    window_end: Mapped[int] = mapped_column(Integer)  # hasta dónde hubo que mirar (s)
+    sol_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)  # precio de SOL usado
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PriceBar(Base):
+    """Vela de precio (Kraken, GeckoTerminal…) para las estrategias de referencia."""
+
+    __tablename__ = "backtest_price_bars"
+
+    source: Mapped[str] = mapped_column(String(20), primary_key=True)
+    asset: Mapped[str] = mapped_column(String(60), primary_key=True)
+    interval: Mapped[str] = mapped_column(String(5), primary_key=True)  # 1m, 1h, 1d
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    open: Mapped[Decimal] = mapped_column(AMOUNT)
+    high: Mapped[Decimal] = mapped_column(AMOUNT)
+    low: Mapped[Decimal] = mapped_column(AMOUNT)
+    close: Mapped[Decimal] = mapped_column(AMOUNT)
+    volume: Mapped[Decimal | None] = mapped_column(AMOUNT)
+
+    __table_args__ = (
+        CheckConstraint("low <= high AND low > 0", name="bar_prices_valid"),
+    )

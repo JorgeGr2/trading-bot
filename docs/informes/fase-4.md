@@ -240,8 +240,36 @@ Jupiter (cotizaciones y precios) y fomoapi.io no han costado nada. Si la simulac
 
 ## 8. Limitaciones y problemas abiertos
 
-<!-- LIMITACIONES -->
+1. **Los filtros deciden casi todo.** Con la configuración aprobada no se copió ninguna de 53 compras reales (apartado 5.1). Es correcto según las reglas, pero así no hay muestra. Decidido contigo: en la interfaz (Fase 6) podrás elegir la liquidez mínima (desde 5.000 $) y si se aceptan tokens con comisión cambiable. Los límites de riesgo seguirán fijos.
+2. **Aún no hay ninguna operación simulada en vivo con resultado.** La ejecución está probada con tests y con respuestas reales de Jupiter grabadas, pero falta verla funcionar durante días con dinero simulado (Fase 8).
+3. **La prueba en vivo depende de que el proceso esté encendido.** En este entorno de la nube se corta al terminar la sesión. Una prueba de una semana necesita un servidor o un ordenador siempre encendido (Fase 7).
+4. **Valoración congelada si Jupiter falla mucho rato.** La posición conserva su última valoración buena, y el registro del patrimonio guarda su antigüedad. No se pasa a 0 automáticamente para no provocar paradas falsas durante una caída de Jupiter.
+5. **La copia teórica solo existe para las compras que llegamos a ejecutar.** No mide lo que se pierde por las compras que fallan o se rechazan. Por eso, el «coste de llegar tarde» está algo subestimado.
+6. **MEV fijo del 0,5 %.** Es un supuesto. Un *sandwich* real puede llevarse hasta toda la tolerancia de slippage (3 %). Conviene probar también con un supuesto más pesimista.
+7. **Comisión prioritaria fija** (100.000 lamports). En momentos de congestión haría falta más para entrar a tiempo.
+8. **Solo Solana.** FOMO también opera en cadenas EVM (Base, BSC, Robinhood Chain…) y muchos de sus mejores traders operan allí. No se ven.
+9. **Ventas parciales por impacto.** Si una venta grande movería mucho el precio, ahora se vende entera o falla. No se trocea.
+10. **Muchas comparaciones.** Entre 230 traders puntuables, que unos pocos salgan bien puede ser azar. Solo cuenta si siguen bien en las semanas siguientes.
 
 ## 9. Conclusión y siguiente paso
 
-<!-- CONCLUSION -->
+**El motor de simulación está terminado, probado y revisado.** Cumple los criterios de aceptación de la Fase 4 de la Fase 1: PnL, costes, slippage, tamaño, stops, caída máxima, pausa automática, rechazo de datos insuficientes, saldos no negativos, sin ventas de más y sin duplicados tras matar el proceso. Sigue en vivo a los traders reales y decide en algo más de un segundo desde su operación.
+
+**Sobre la rentabilidad todavía no se puede concluir nada**, y los datos que tenemos no invitan al optimismo:
+
+- La gran mayoría de traders de FOMO pierde operación a operación, también los de la leaderboard en los últimos 30 días.
+- Solo 5 de 230 tienen ventaja, y los dos más fuertes ganan en 2-5 minutos, justo el patrón en el que copiar con retraso suele salir caro.
+- Con los filtros estrictos no se copió ninguna operación en dos horas.
+
+### Lo que necesito de ti
+
+1. **Tu aprobación de la Fase 4**, o los cambios que quieras.
+2. **Siguiente fase:** seguimos el orden previsto, como has decidido. La **Fase 5 (backtester)** reproduce con los historiales ya importados qué habría pasado copiando a cada trader, con la latencia y los costes medidos aquí. Es barata (no gasta créditos) y responde en horas lo que la prueba en vivo tardaría semanas en decir: si la ventaja de @nekomayu, @OinkersRUs o A9aqAHUX sobrevive al retraso de copiar.
+3. **Anotado para la Fase 6 (interfaz):**
+   - un **modo prueba** que lances tú, con la duración que elijas (por ejemplo, 7 días);
+   - los **filtros ajustables en pantalla**;
+   - el **semáforo «¿Es rentable?»** con los criterios del apartado 12 de la Fase 1.
+
+   Con una semana el semáforo casi seguro saldrá en gris (muestra insuficiente): para usar dinero real hacen falta al menos 28 días y 100 operaciones cerradas con ventaja demostrada.
+4. **Más adelante: dónde funcionará el bot** las 24 h (un servidor de 5-10 €/mes o tu ordenador), antes de la Fase 7.
+5. **Los clanes:** si quieres que los analice, mándame capturas de la lista de miembros de cada uno.

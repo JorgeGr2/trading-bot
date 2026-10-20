@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 
 import structlog
 
@@ -20,6 +21,7 @@ from copybot import sim_cli, traders_cli
 from copybot.config import Settings
 from copybot.db.repo import Repository
 from copybot.db.session import make_engine, make_sessionmaker
+from copybot.envcheck import unknown_settings
 from copybot.monitor_runner import make_rpc, run_monitor
 
 log = structlog.get_logger(__name__)
@@ -65,6 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     sim_cli.add_parsers(sub)
     args = parser.parse_args(argv)
 
+    unknown = unknown_settings()
+    if unknown:
+        print(
+            "Variables de configuración desconocidas (¿una errata?): " + ", ".join(unknown),
+            file=sys.stderr,
+        )
+        return 2
     settings = Settings()
     if args.command == "wallets":
         copylog.configure()

@@ -48,6 +48,14 @@ def _usd(value: Decimal | None) -> str:
     return "—" if value is None else f"{value:+,.2f} $"
 
 
+def _tally(r: BookResult, result: Decimal) -> None:
+    if result > 0:
+        r.wins += 1
+        r.gross_win_usd += result
+    else:
+        r.gross_loss_usd += result
+
+
 def reason_group(reason: str) -> str:
     """Agrupa motivos parecidos (sin cifras) para contarlos."""
     first = reason.split(";")[0].strip()
@@ -98,7 +106,8 @@ class BookResult:
 @dataclass
 class Comparison:
     resolved: int  # cerradas + invendibles del libro de señales
-    realistic_usd: Decimal  # todas ellas, más las comisiones de sus órdenes fallidas
+    # Todas ellas con las comisiones de sus ventas fallidas, menos las de compras fallidas.
+    realistic_usd: Decimal
     comparable: int  # las que tienen precio del trader (copia teórica posible)
     realistic_comparable_usd: Decimal
     theoretical_usd: Decimal | None
@@ -173,6 +182,36 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
                 )
             ).all()
         )
+        # Comisiones de órdenes fallidas: las de ventas van a su posición; las de compras
+        # que nunca llegaron a abrir posición (position_id nulo), al libro.
+        pos_failed_fees = {
+            pid: Decimal(v or 0)
+            for pid, v in (
+                await s.execute(
+                    select(LedgerEntry.position_id, func.sum(LedgerEntry.delta_usd))
+                    .where(
+                        LedgerEntry.account == "fees",
+                        LedgerEntry.memo == "orden fallida",
+                        LedgerEntry.position_id.is_not(None),
+                    )
+                    .group_by(LedgerEntry.position_id)
+                )
+            ).all()
+        }
+        buy_failed_fees = {
+            book: Decimal(v or 0)
+            for book, v in (
+                await s.execute(
+                    select(LedgerEntry.book, func.sum(LedgerEntry.delta_usd))
+                    .where(
+                        LedgerEntry.account == "fees",
+                        LedgerEntry.memo == "orden fallida",
+                        LedgerEntry.position_id.is_(None),
+                    )
+                    .group_by(LedgerEntry.book)
+                )
+            ).all()
+        }
         with_sol = (
             PortfolioSnapshot.book == PORTFOLIO,
             PortfolioSnapshot.details["sol_usd"].astext.is_not(None),
@@ -224,10 +263,13 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
             value = _position_value(p)
             r.unrealized_usd += value - p.cost_usd - p.rent_usd
             if p.unsellable:
-                # Sin ruta de venta: se da por perdida (sesgo de supervivencia si no).
-                result = p.realized_pnl_usd - p.cost_usd - p.rent_usd
+                # Sin ruta de venta: lo que queda se da por perdido (si no, sesgo de
+                # supervivencia). Lo ya vendido cuenta; puede salir en positivo.
+                result = (
+                    p.realized_pnl_usd - p.cost_usd - p.rent_usd - pos_failed_fees.get(p.id, ZERO)
+                )
                 r.written_off += 1
-                r.gross_loss_usd += result
+                _tally(r, result)
                 if p.book == SIGNALS:
                     resolved_signals.append((p, result))
             open_rows.append(
@@ -244,13 +286,10 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
             )
         else:
             r.closed_positions += 1
-            if p.realized_pnl_usd > 0:
-                r.wins += 1
-                r.gross_win_usd += p.realized_pnl_usd
-            else:
-                r.gross_loss_usd += p.realized_pnl_usd
+            result = p.realized_pnl_usd - pos_failed_fees.get(p.id, ZERO)
+            _tally(r, result)
             if p.book == SIGNALS:
-                resolved_signals.append((p, p.realized_pnl_usd))
+                resolved_signals.append((p, result))
 
     # Copia teórica: solo las cerradas con precio del trader; la realista, sobre las mismas.
     comparable = [
@@ -267,7 +306,7 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
     comparison = Comparison(
         resolved=len(resolved_signals),
         realistic_usd=sum((result for _, result in resolved_signals), ZERO)
-        - books[SIGNALS].failed_fees_usd,
+        - buy_failed_fees.get(SIGNALS, ZERO),
         comparable=len(comparable),
         realistic_comparable_usd=sum((result for _, result in comparable), ZERO),
         theoretical_usd=sum(
@@ -299,11 +338,12 @@ async def build_report(sessions: async_sessionmaker[AsyncSession], now: datetime
         else:
             t["cerradas"] += 1
             if p.theoretical_amount is not None and entry_cost[p.id] > 0:
-                t["real_cerradas"] += p.realized_pnl_usd  # sobre las mismas que la teórica
+                # Sobre las mismas que la teórica, con las comisiones de sus ventas fallidas.
+                t["real_cerradas"] += p.realized_pnl_usd - pos_failed_fees.get(p.id, ZERO)
                 t["teorica_cerradas"] = (t["teorica_cerradas"] or ZERO) + (
                     p.theoretical_proceeds_usd - entry_cost[p.id]
                 )
-        t["resultado"] += p.realized_pnl_usd
+        t["resultado"] += p.realized_pnl_usd - pos_failed_fees.get(p.id, ZERO)
     traders = sorted(
         ({"trader": w} | v for w, v in per_trader.items()), key=lambda x: x["resultado"]
     )

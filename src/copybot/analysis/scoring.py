@@ -28,9 +28,10 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 
 from copybot.analysis.metrics import ANALYZER_VERSION, AnalysisParams, WindowMetrics
+from copybot.config import GroupSettings
 
 # 2: ventaja y consistencia con la serie prudente (incluye las posiciones abandonadas) y
 #    robustez «sin las 3 mejores» por operación, no en dólares; el riesgo usa la pérdida
@@ -38,10 +39,12 @@ from copybot.analysis.metrics import ANALYZER_VERSION, AnalysisParams, WindowMet
 SCORING_VERSION = "2"
 
 
-class ScoringParams(BaseSettings):
+class ScoringParams(GroupSettings):
     """Parámetros de la puntuación (variables ``COPYBOT_SCORING_*``)."""
 
-    model_config = SettingsConfigDict(env_prefix="COPYBOT_SCORING_", extra="forbid")
+    model_config = SettingsConfigDict(
+        env_prefix="COPYBOT_SCORING_", env_file=".env", env_file_encoding="utf-8", extra="forbid"
+    )
 
     window_days: int = Field(default=30, gt=0, le=90)
     recent_window_days: int = Field(default=7, gt=0, le=30)

@@ -30,6 +30,7 @@ clave de idempotencia: repetirla no crea otra orden.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,10 @@ BOOKS = (PORTFOLIO, SIGNALS)
 ENTRY_STATES = {PORTFOLIO: frozenset({"RUNNING"}), SIGNALS: frozenset({"RUNNING", "HALTED_RISK"})}
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 SOL_PRICE_MAX_AGE_S = 600
+
+
+class LockLostError(RuntimeError):
+    """Otro motor tiene el bloqueo: este debe pararse."""
 
 
 class Market(Protocol):
@@ -147,8 +152,10 @@ class Engine:
             ):
                 for kind, detail in halts:
                     await self.store.risk_event(kind, PORTFOLIO, {"detalle": detail})
+        # Se empieza en solo lectura: la primera vuelta pasa a RUNNING en cuanto el monitor
+        # da datos (así arrancar no deja un aviso falso de «monitor caído»).
         await self.store.set_state(
-            "RUNNING", "recuperación terminada", "engine", only_from=["RECOVERING"]
+            "READ_ONLY", "esperando datos del monitor", "engine", only_from=["RECOVERING"]
         )
         log.info("sim_start", recovered=recovered, state=(await self.store.state()).state)
         return recovered
@@ -157,22 +164,37 @@ class Engine:
         self._stop.set()
 
     async def run(self) -> None:
-        async with self.store.exclusive_run() as alone:
-            if not alone:
+        async with self.store.exclusive_run() as lock:
+            if not lock.held:
                 raise RuntimeError("ya hay otro motor de simulación en marcha")
             await self.start()
+            failures = 0
             try:
                 while not self._stop.is_set():
-                    if not await self.tick():
-                        break
-                    await self._sleep(self.params.poll_seconds)
+                    try:
+                        if not await lock.ensure():
+                            raise LockLostError(
+                                "se perdió el bloqueo y lo tiene otro motor: este se para"
+                            )
+                        if not await self.tick():
+                            break
+                        failures = 0
+                        await self._sleep(self.params.poll_seconds)
+                    except LockLostError:
+                        raise
+                    except Exception as exc:
+                        # P. ej. PostgreSQL reiniciándose: se reintenta, cada vez más espaciado.
+                        failures += 1
+                        log.exception("sim_tick_failed", failures=failures, error=str(exc))
+                        await self._sleep(min(2.0**failures, 30.0))
             finally:
-                await self.store.set_state(
-                    "STOPPED",
-                    "motor detenido",
-                    "engine",
-                    only_from=["RUNNING", "READ_ONLY", "RECOVERING"],
-                )
+                with contextlib.suppress(Exception):
+                    await self.store.set_state(
+                        "STOPPED",
+                        "motor detenido",
+                        "engine",
+                        only_from=["RUNNING", "READ_ONLY", "RECOVERING"],
+                    )
 
     async def tick(self) -> bool:
         """Una vuelta del bucle. ``False`` si alguien ha parado el motor (STOPPED).
@@ -180,11 +202,17 @@ class Engine:
         Cada fase va protegida: un fallo inesperado se registra y la vuelta sigue (la
         siguiente lo reintenta), en vez de tumbar el motor.
         """
-        state = (await self.store.state()).state
-        if state == "STOPPED":
+        control = await self.store.state()
+        if control.state == "STOPPED":
             log.info("sim_stopped")
             return False
-        await self._guard("feed", self._check_feed(state))
+        # Entre vuelta y vuelta no queda ninguna orden en curso: si hay alguna «pending»,
+        # es que un error la dejó a medias. Se da por no ejecutada (libera la reserva).
+        await self._guard(
+            "recover",
+            self.store.recover_pending("quedó a medias por un error: se da por no ejecutada"),
+        )
+        await self._guard("feed", self._check_feed(control.state, control.reason))
         await self._guard("ingest", self.store.ingest_signals())
         for signal in await self.store.pending_signals(BOOKS):
             await self._guard(f"signal {signal.id}", self.process_signal(signal))
@@ -203,25 +231,28 @@ class Engine:
         except Exception as exc:
             log.exception("sim_phase_failed", phase=what, error=str(exc))
 
-    async def _check_feed(self, state: str) -> None:
+    async def _check_feed(self, state: str, current_reason: str = "") -> None:
         """Sin datos recientes del monitor (proceso vivo y WebSocket conectado), solo
         lectura."""
         age, details = await self.store.monitor_heartbeat()
         ws_down = details.get("ws_connected") is False
         stale = age is None or age > self._stale or ws_down
+        reason = (
+            "el monitor no da señales de vida"
+            if age is None
+            else "el WebSocket del monitor está desconectado"
+            if ws_down
+            else f"el último latido del monitor es de hace {age:.0f} s"
+        )
         if stale and state == "RUNNING":
-            reason = (
-                "el monitor no da señales de vida"
-                if age is None
-                else "el WebSocket del monitor está desconectado"
-                if ws_down
-                else f"el último latido del monitor es de hace {age:.0f} s"
-            )
             if await self.store.set_state("READ_ONLY", reason, "engine", only_from=["RUNNING"]):
                 await self.store.risk_event("stale_feed", None, {"motivo": reason})
+        elif stale and state == "READ_ONLY" and reason != current_reason:
+            # Ya estaba en solo lectura (p. ej. al arrancar): solo se actualiza el motivo.
+            await self.store.set_state("READ_ONLY", reason, "engine", only_from=["READ_ONLY"])
         elif not stale and state == "READ_ONLY":
             await self.store.set_state(
-                "RUNNING", "el monitor vuelve a dar datos", "engine", only_from=["READ_ONLY"]
+                "RUNNING", "el monitor da datos", "engine", only_from=["READ_ONLY"]
             )
 
     # --- Señales ---------------------------------------------------------------------------
@@ -565,8 +596,12 @@ class Engine:
         *,
         theoretical_price: Decimal | None = None,
     ) -> bool:
-        profile = await self._known_profile(pos.mint)
-        costs = await self._costs()
+        try:
+            profile = await self._known_profile(pos.mint)
+            costs = await self._costs()
+        except Exception as exc:
+            profile = costs = None
+            log.warning("sell_data_failed", order=order_id, error=str(exc))
         if profile is None or costs is None:
             await self.store.fail_order(order_id, "faltan datos del token o precio de SOL", ZERO)
             return False

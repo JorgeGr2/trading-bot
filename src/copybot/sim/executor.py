@@ -8,11 +8,12 @@ Ejecución simulada (apartado 6.1 del informe de la Fase 1):
 
 1. t2: cotización para nuestro tamaño (la recibe ya hecha, del filtro de mercado).
 2. Espera de verdad la latencia configurada (envío y confirmación).
-3. t3: vuelve a cotizar y aplica el recorte supuesto por MEV (un *sandwich* se lleva su
-   parte antes de que la transacción compruebe el mínimo). Si lo recibido queda por
-   debajo de lo cotizado en t2 menos la tolerancia de slippage, la orden falla como
-   fallaría on-chain y se paga igualmente la comisión. Si Jupiter no responde en t3, la
-   transacción ya se habría enviado: también falla y paga la comisión.
+3. t3: vuelve a cotizar. Si t3 queda por debajo de lo cotizado en t2 menos la
+   tolerancia de slippage (el mínimo de la transacción), la orden falla como fallaría
+   on-chain y se paga igualmente la comisión. Si no, se aplica el recorte supuesto por
+   MEV: un *sandwich* se lleva su parte, pero como mucho hasta ese mínimo (si se llevara
+   más, la transacción fallaría y el atacante no ganaría nada). Si Jupiter no responde
+   en t3, la transacción ya se habría enviado: también falla y paga la comisión.
 4. Si no falla, se descuenta la comisión de transferencia del token (Token-2022).
 """
 
@@ -80,12 +81,19 @@ class SimExecutor:
         self._tolerance = slippage_tolerance_bps
         self._sleep = sleep
 
-    def _slipped(self, t2: Quote, received_raw: Decimal) -> Decimal | None:
-        """Cuánto peor que t2 sale lo recibido (tras MEV), si supera la tolerancia."""
-        floor = Decimal(t2.out_raw) * (1 - Decimal(self._tolerance) / 10_000)
-        if received_raw < floor:
-            return 1 - received_raw / Decimal(t2.out_raw)
+    def _floor(self, t2: Quote) -> Decimal:
+        """Mínimo que acepta la transacción: lo cotizado en t2 menos la tolerancia."""
+        return Decimal(t2.out_raw) * (1 - Decimal(self._tolerance) / 10_000)
+
+    def _slipped(self, t2: Quote, t3: Quote) -> Decimal | None:
+        """Cuánto peor que t2 sale t3, si queda por debajo del mínimo."""
+        if Decimal(t3.out_raw) < self._floor(t2):
+            return 1 - Decimal(t3.out_raw) / Decimal(t2.out_raw)
         return None
+
+    def _received(self, t2: Quote, t3: Quote, costs: CostModel) -> Decimal:
+        """Lo recibido tras el MEV, que nunca baja del mínimo de la transacción."""
+        return max(costs.after_mev(Decimal(t3.out_raw)), self._floor(t2))
 
     async def _t3(self, input_mint: str, output_mint: str, amount_raw: int) -> Quote | str | None:
         try:
@@ -105,8 +113,7 @@ class SimExecutor:
         if t3 is None:
             return Execution(False, "sin ruta de compra al ejecutar", fees_usd=fee, detail=detail)
         detail |= {"t3_out": t3.out_raw, "t3_at": t3.at.isoformat()}
-        after_mev_raw = costs.after_mev(Decimal(t3.out_raw))
-        slipped = self._slipped(t2, after_mev_raw)
+        slipped = self._slipped(t2, t3)
         if slipped is not None:
             return Execution(
                 False,
@@ -114,7 +121,8 @@ class SimExecutor:
                 fees_usd=fee,
                 detail=detail,
             )
-        received = costs.after_transfer_fee(after_mev_raw.scaleb(-decimals), fee_bps)
+        received_raw = self._received(t2, t3, costs)
+        received = costs.after_transfer_fee(received_raw.scaleb(-decimals), fee_bps)
         return Execution(True, token_amount=received, usd_amount=usd, fees_usd=fee, detail=detail)
 
     async def sell(
@@ -134,8 +142,7 @@ class SimExecutor:
         if t3 is None:
             return Execution(False, "sin ruta de venta al ejecutar", fees_usd=fee, detail=detail)
         detail |= {"t3_out": t3.out_raw, "t3_at": t3.at.isoformat()}
-        after_mev_raw = costs.after_mev(Decimal(t3.out_raw))
-        slipped = self._slipped(t2, after_mev_raw)
+        slipped = self._slipped(t2, t3)
         if slipped is not None:
             return Execution(
                 False,
@@ -143,7 +150,7 @@ class SimExecutor:
                 fees_usd=fee,
                 detail=detail,
             )
-        proceeds = after_mev_raw.scaleb(-USDC_DECIMALS)
+        proceeds = self._received(t2, t3, costs).scaleb(-USDC_DECIMALS)
         return Execution(
             True, token_amount=amount, usd_amount=proceeds, fees_usd=fee, detail=detail
         )

@@ -25,9 +25,10 @@ from decimal import Decimal
 from typing import Any
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 
 from copybot.analysis.positions import ZERO, Ledger, RoundTrip, Trade, build_ledger
+from copybot.config import GroupSettings
 
 # Cambiarla cuando cambie el cálculo: forma parte del params_hash de los snapshots.
 # 2: serie prudente con las posiciones abandonadas; abandono según la última actividad.
@@ -35,10 +36,12 @@ from copybot.analysis.positions import ZERO, Ledger, RoundTrip, Trade, build_led
 ANALYZER_VERSION = "3"
 
 
-class AnalysisParams(BaseSettings):
+class AnalysisParams(GroupSettings):
     """Parámetros del cálculo de métricas (variables ``COPYBOT_ANALYSIS_*``)."""
 
-    model_config = SettingsConfigDict(env_prefix="COPYBOT_ANALYSIS_", extra="forbid")
+    model_config = SettingsConfigDict(
+        env_prefix="COPYBOT_ANALYSIS_", env_file=".env", env_file_encoding="utf-8", extra="forbid"
+    )
 
     # Una operación se da por cerrada cuando queda como mucho esta fracción de la
     # cantidad máxima que llegó a tener.

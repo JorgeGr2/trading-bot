@@ -645,9 +645,30 @@ async def test_unexpected_errors_never_leave_orders_pending(world):
 
 
 async def test_only_one_engine_at_a_time(world):
+    from sqlalchemy import text
+
+    from copybot.sim.store import RUN_LOCK_ID
+
+    async def drop_lock_connection() -> None:
+        async with world.sessions() as s:
+            await s.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND objid = :k"
+                ),
+                {"k": RUN_LOCK_ID},
+            )
+
     store = world.build().store
     async with store.exclusive_run() as first, store.exclusive_run() as second:
-        assert first and not second
+        assert first.held and not second.held
+        # Si se cae la conexión del bloqueo, ensure() lo nota y lo vuelve a pedir…
+        await drop_lock_connection()
+        assert await first.ensure()
+        # …y si entretanto lo ha tomado otro motor, avisa para que este se pare.
+        await drop_lock_connection()
+        assert await second.acquire()
+        assert not await first.ensure()
 
 
 async def test_disconnected_websocket_switches_to_read_only(world):
@@ -678,3 +699,82 @@ async def test_stop_loss_still_watches_after_a_failed_partial_copy(world):
     assert pos.status == "closed"
     purposes = [o.purpose for o in await world.orders(side="sell", book=PORTFOLIO)]
     assert purposes == ["copy_exit", "stop_loss"]
+
+
+# --- Segunda revisión ------------------------------------------------------------------
+
+
+async def test_start_waits_for_the_monitor_without_a_false_alarm(world):
+    eng = world.build()
+    await eng.start()
+    assert (await eng.store.state()).state == "READ_ONLY"
+    await eng.tick()  # el monitor ya late: pasa a RUNNING sin dejar aviso de riesgo
+    assert (await eng.store.state()).state == "RUNNING"
+    async with world.sessions() as s:
+        assert list(await s.scalars(select(RiskEvent.kind))) == []
+
+
+async def test_orders_left_pending_by_an_error_are_recovered_next_tick(world):
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", m, "50000", "500")
+    real_fill = eng.store.fill_entry
+    real_fail = eng.store.fail_order
+
+    async def db_down(*args, **kwargs):
+        raise OSError("conexión perdida")
+
+    eng.store.fill_entry = db_down  # type: ignore[method-assign]
+    eng.store.fail_order = db_down  # type: ignore[method-assign]
+    await eng.tick()
+    assert len(await world.orders(status="pending")) == 2  # se quedaron a medias
+    eng.store.fill_entry = real_fill  # type: ignore[method-assign]
+    eng.store.fail_order = real_fail  # type: ignore[method-assign]
+    await eng.tick()
+    pending = await world.orders(status="pending")
+    assert pending == []
+    reasons = {o.status_reason for o in await world.orders(purpose="entry")}
+    assert any("a medias por un error" in r for r in reasons)
+    assert (await world.cash()).reserved_usd == 0
+
+
+async def test_run_survives_a_database_hiccup(world):
+    eng = world.build()
+    calls = 0
+    real_tick = eng.tick
+
+    async def flaky_tick() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("PostgreSQL reiniciándose")
+        if calls == 3:
+            await eng.store.set_state("STOPPED", "fin de la prueba", "test")
+        return await real_tick()
+
+    eng.tick = flaky_tick  # type: ignore[method-assign]
+    await eng.run()
+    assert calls == 3
+    assert (await eng.store.state()).state == "STOPPED"
+
+
+async def test_unsellable_position_that_already_won_counts_as_a_win(world):
+    from copybot.sim.report import build_report
+
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await eng.tick()
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    world.quotes.price[m] = Decimal("0.05")  # x5
+    await world.trade("sell", m, "35000", "1750")  # el trader vende el 70 %
+    await eng.tick()
+    world.quotes.no_route.add(m)  # y el resto ya no se puede vender
+    world.clock.advance(seconds=61)
+    await world.heartbeat()
+    await eng.tick()
+    report = await build_report(world.sessions, world.clock())
+    signals = report.books[SIGNALS]
+    assert signals.written_off == 1 and signals.wins == 1 and signals.gross_loss_usd == 0

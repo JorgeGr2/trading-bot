@@ -80,7 +80,8 @@ async def _control(action: str, store: SimStore) -> int:
     else:
         # Sea cual sea el estado (también desde una pausa), no se reanuda con los
         # límites de pérdida superados.
-        reasons = halt_reasons(await store.book_state(PORTFOLIO), RiskLimits())
+        # roll_equity: con el día (UTC) ya actualizado, para no juzgar con la pérdida de ayer.
+        reasons = halt_reasons(await store.roll_equity(PORTFOLIO), RiskLimits())
         if reasons:
             print("No se reanuda: los límites de riesgo siguen superados.")
             for _, detail in reasons:

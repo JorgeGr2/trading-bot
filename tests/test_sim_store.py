@@ -453,3 +453,30 @@ async def test_ledger_balances_with_awkward_decimals(store, engine):
         pos = await s.get(SimPosition, pos_id)
     assert pos.status == "closed" and pos.amount == 0
     await assert_books_balance(engine)
+
+
+async def test_very_cheap_tokens_do_not_overflow_the_rounding(store, engine):
+    """Un token muy barato da más de 1e10 unidades por 10 $: el redondeo a 18 decimales
+    no debe fallar (el contexto Decimal por defecto solo tiene 28 dígitos)."""
+    sig = await signal(store, engine)
+    order = await entry(store, sig)
+    pos_id = await store.fill_entry(
+        order.order_id,
+        buy_ex(tokens="50000000000.123456789", usd="9.68"),
+        rent_lamports=1,
+        rent_usd=Decimal("0.30"),
+        theoretical_price=Decimal("0.0000000002"),
+        theoretical_tokens=Decimal(10) / Decimal("0.0000000002"),
+    )
+    oid = await store.open_exit(
+        position_id=pos_id,
+        key="big",
+        amount=Decimal("50000000000.123456789"),
+        purpose="stop_loss",
+        signal_id=None,
+        decision={},
+    )
+    assert await store.fill_exit(
+        oid, sell_ex("50000000000.123456789", "5"), rent_refund_usd=Decimal("0.30")
+    )
+    await assert_books_balance(engine)

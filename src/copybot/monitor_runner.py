@@ -55,18 +55,22 @@ async def run_monitor(settings: Settings, repo: Repository, rpc: SolanaRpc, prov
 
     async def heartbeat() -> None:
         while True:
-            await repo.heartbeat(
-                "monitor",
-                {
-                    "stats": monitor.stats,
-                    "last_live_at": monitor.last_live_at.isoformat()
-                    if monitor.last_live_at
-                    else None,
-                    "at": datetime.now(UTC).isoformat(),
-                    "ws_connected": subscriber.connected,
-                },
-            )
+            try:
+                await beat_once()
+            except Exception as exc:  # un fallo puntual (p. ej. de la BD) no para el latido
+                log.warning("heartbeat_failed", error=str(exc))
             await asyncio.sleep(HEARTBEAT_SECONDS)
+
+    async def beat_once() -> None:
+        await repo.heartbeat(
+            "monitor",
+            {
+                "stats": monitor.stats,
+                "last_live_at": monitor.last_live_at.isoformat() if monitor.last_live_at else None,
+                "at": datetime.now(UTC).isoformat(),
+                "ws_connected": subscriber.connected,
+            },
+        )
 
     subscriber = LogsSubscriber(ws_url, wallets)
     beat = asyncio.create_task(heartbeat())

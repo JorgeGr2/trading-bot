@@ -250,14 +250,14 @@ async def test_buy_fills_after_latency_with_mev_and_transfer_fee():
 
 
 async def test_buy_fails_on_slippage_and_still_pays_the_fee():
-    # En t3 se recibirían 960 en vez de 1.000 y el MEV se lleva un 0,5 % más: −4,48 %.
+    # En t3 se recibirían 960 en vez de 1.000: −4 % > 3 % de tolerancia.
     ex = SimExecutor(
         FakeQuotes([960_000_000]), latency_ms=0, slippage_tolerance_bps=300, sleep=Sleeper()
     )
     r = await ex.buy(MEME, 6, D(10), 0, t2(1_000_000_000), COSTS)
-    assert not r.ok and "slippage" in r.reason and "4.48%" in r.reason
+    assert not r.ok and "slippage" in r.reason and "4.00%" in r.reason
     assert r.fees_usd == D("0.0105") and r.token_amount == 0
-    # −2,4 % y el 0,5 % de MEV (−2,9 %) siguen dentro de la tolerancia.
+    # −2,4 % sigue dentro de la tolerancia.
     ok = SimExecutor(
         FakeQuotes([976_000_000]), latency_ms=0, slippage_tolerance_bps=300, sleep=Sleeper()
     )
@@ -319,13 +319,26 @@ async def test_real_jupiter_price_gives_sol_price_and_liquidity():
     await prices.aclose()
 
 
-async def test_mev_counts_against_the_slippage_limit():
-    # t3 justo en el mínimo (−3 %): tras el 0,5 % de MEV queda por debajo y falla.
+async def test_mev_never_takes_more_than_the_slippage_floor():
+    # t3 justo en el mínimo (−3 %): el sandwich no puede llevarse nada más sin hacer
+    # fallar la transacción, así que se recibe el mínimo.
     ex = SimExecutor(
-        FakeQuotes([970_000_000]), latency_ms=0, slippage_tolerance_bps=300, sleep=Sleeper()
+        FakeQuotes([970_000_000, 980_000_000]),
+        latency_ms=0,
+        slippage_tolerance_bps=300,
+        sleep=Sleeper(),
     )
     r = await ex.buy(MEME, 6, D(10), 0, t2(1_000_000_000), COSTS)
-    assert not r.ok and "slippage" in r.reason and r.fees_usd == COSTS.tx_fee_usd()
+    assert r.ok and r.token_amount == D(970)
+    # Con más margen, el MEV se lleva su 0,5 % (980 → 975,1), por encima del mínimo.
+    r = await ex.buy(MEME, 6, D(10), 0, t2(1_000_000_000), COSTS)
+    assert r.ok and r.token_amount == D("975.1")
+    # Y con una tolerancia menor que el MEV no fallan todas las órdenes.
+    tight = SimExecutor(
+        FakeQuotes([1_000_000_000]), latency_ms=0, slippage_tolerance_bps=10, sleep=Sleeper()
+    )
+    r = await tight.buy(MEME, 6, D(10), 0, t2(1_000_000_000), COSTS)
+    assert r.ok and r.token_amount == D(999)
 
 
 async def test_jupiter_error_at_t3_fails_and_pays_the_fee():

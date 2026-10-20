@@ -131,3 +131,21 @@ def test_group_settings_are_read_from_dotenv(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("COPYBOT_RISK_MAX_OPEN_POSITIONS=9\n")
     with pytest.raises(ValidationError):
         RiskLimits()
+
+
+def test_unknown_copybot_variables_are_reported(tmp_path):
+    from copybot.envcheck import unknown_settings
+
+    env = {
+        "COPYBOT_RISK_MAX_OPEN_POSITONS": "2",  # errata
+        "COPYBOT_SIM_LATENCY_MS": "2000",
+        "COPYBOT_HELIUS_API_KEY": "x",
+        "COPYBOT_TEST_DATABASE_URL": "x",
+        "OTRA_COSA": "1",
+    }
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("# comentario\nCOPYBOT_SAFETY_MIN_LIQUIDITY_USD=5000\nCOPYBOT_SIMM_X=1\n")
+    assert unknown_settings(env, dotenv) == [
+        "COPYBOT_RISK_MAX_OPEN_POSITONS",
+        "COPYBOT_SIMM_X",
+    ]

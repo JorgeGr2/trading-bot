@@ -24,14 +24,16 @@ cero.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Context, Decimal
 from typing import Any
 
+import structlog
 from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -57,6 +59,8 @@ from copybot.db.models import WalletEvent as WalletEventRow
 from copybot.sim.executor import Execution
 from copybot.sim.risk import BookState, entry_rejections, halt_reasons
 
+log = structlog.get_logger(__name__)
+
 ZERO = Decimal(0)
 PORTFOLIO = "portfolio"
 SIGNALS = "signals"
@@ -65,8 +69,13 @@ QUANTUM = Decimal("1e-18")
 RUN_LOCK_ID = 74_201_810  # pg_advisory_lock del motor de simulación
 
 
+# Precisión de sobra para 20 cifras enteras y 18 decimales (la del contexto por defecto,
+# 28, no llega: un token muy barato puede dar 1e10 unidades o más).
+_CONTEXT = Context(prec=60)
+
+
 def q(value: Decimal) -> Decimal:
-    return value.quantize(QUANTUM, rounding=ROUND_HALF_UP)
+    return value.quantize(QUANTUM, rounding=ROUND_HALF_UP, context=_CONTEXT)
 
 
 def position_value(p: SimPosition) -> Decimal:
@@ -111,6 +120,50 @@ class EntryResult:
     @property
     def accepted(self) -> bool:
         return self.order_id is not None and not self.reasons
+
+
+class RunLock:
+    """Bloqueo de PostgreSQL (``pg_advisory_lock``) del motor, en su propia conexión."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._engine = sessions.kw["bind"]
+        self._conn: Any = None
+        self.held = False
+
+    async def acquire(self) -> bool:
+        await self._close()
+        conn = await self._engine.connect()
+        conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        got = bool(await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": RUN_LOCK_ID}))
+        if got:
+            self._conn = conn
+        else:
+            await conn.close()
+        self.held = got
+        return got
+
+    async def ensure(self) -> bool:
+        """¿Sigue siendo nuestro? Si la conexión se cayó, lo vuelve a pedir."""
+        try:
+            if self._conn is not None:
+                await self._conn.scalar(text("SELECT 1"))
+                return True
+        except Exception as exc:  # la conexión se ha perdido, y el bloqueo con ella
+            log.warning("run_lock_lost", error=type(exc).__name__)
+        return await self.acquire()
+
+    async def release(self) -> None:
+        if self._conn is not None and self.held:
+            with contextlib.suppress(Exception):
+                await self._conn.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": RUN_LOCK_ID})
+        await self._close()
+        self.held = False
+
+    async def _close(self) -> None:
+        if self._conn is not None:
+            with contextlib.suppress(Exception):
+                await self._conn.close()
+            self._conn = None
 
 
 class SimStore:
@@ -191,15 +244,19 @@ class SimStore:
         return (self._clock() - row.beat_at).total_seconds(), dict(row.details or {})
 
     @asynccontextmanager
-    async def exclusive_run(self) -> AsyncIterator[bool]:
-        """Bloqueo para que solo corra un motor a la vez (``False``: ya hay otro)."""
-        async with self._sessions() as s:
-            got = bool(await s.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": RUN_LOCK_ID}))
-            try:
-                yield got
-            finally:
-                if got:
-                    await s.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": RUN_LOCK_ID})
+    async def exclusive_run(self) -> AsyncIterator[RunLock]:
+        """Bloqueo para que solo corra un motor a la vez (``lock.held``: lo tenemos).
+
+        Va en una conexión propia en modo *autocommit* (sin transacción abierta todo el
+        rato). Si esa conexión se cae, el bloqueo se pierde: ``lock.ensure()`` lo
+        comprueba en cada vuelta y lo vuelve a pedir.
+        """
+        lock = RunLock(self._sessions)
+        await lock.acquire()
+        try:
+            yield lock
+        finally:
+            await lock.release()
 
     # --- Señales --------------------------------------------------------------------
 
@@ -578,14 +635,15 @@ class SimStore:
                 )
             return True
 
-    async def recover_pending(self) -> int:
-        """Tras un reinicio: las órdenes a medias se dan por fallidas (no se ejecutaron)."""
+    async def recover_pending(
+        self, reason: str = "interrumpida por un reinicio: se da por no ejecutada"
+    ) -> int:
+        """Las órdenes a medias se dan por fallidas (no se ejecutaron). Al arrancar, o al
+        empezar cada vuelta del motor: entre vuelta y vuelta no queda ninguna en curso."""
         async with self._sessions() as s:
             pending = list(await s.scalars(select(SimOrder.id).where(SimOrder.status == "pending")))
         for order_id in pending:
-            await self.fail_order(
-                order_id, "interrumpida por un reinicio: se da por no ejecutada", ZERO
-            )
+            await self.fail_order(order_id, reason, ZERO)
         return len(pending)
 
     # --- Salidas -------------------------------------------------------------------------

@@ -490,3 +490,19 @@ async def test_very_cheap_tokens_do_not_overflow_the_rounding(store, engine):
         oid, sell_ex("50000000000.123456789", "5"), rent_refund_usd=Decimal("0.30")
     )
     await assert_books_balance(engine)
+
+
+async def test_portfolio_positions_are_valued_first(store, engine):
+    sigs = [await signal(store, engine, i) for i in range(1, 4)]
+    ids = {}
+    for book, sg in ((SIGNALS, sigs[0]), (SIGNALS, sigs[1]), (PORTFOLIO, sigs[2])):
+        order = await entry(store, sg, book=book)
+        ids[book, sg.id] = await store.fill_entry(
+            order.order_id,
+            buy_ex(),
+            rent_lamports=1,
+            rent_usd=Decimal("0.30"),
+            theoretical_price=None,
+        )
+    stale = await store.stale_positions(NOW + timedelta(hours=1), limit=2)
+    assert stale[0].book == PORTFOLIO  # aunque se abrió la última

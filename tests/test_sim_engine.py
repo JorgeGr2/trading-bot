@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from copybot.config import RiskLimits
@@ -821,3 +821,110 @@ async def test_aggressive_default_profile(world):
     await world.heartbeat()
     await eng.tick()
     assert (await eng.store.state()).state == "HALTED_RISK"
+
+
+async def test_backfilled_signal_without_block_time_is_rejected(world):
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", m, "50000", "500", via="backfill")
+    async with world.sessions.begin() as s:  # el nodo no dio la hora del bloque
+        await s.execute(update(WalletEvent).values(block_time=None))
+    await eng.tick()
+    (o,) = await world.orders(book=PORTFOLIO)
+    assert o.status == "rejected" and "sin hora de bloque" in o.status_reason
+
+
+async def test_trader_paying_nothing_is_incoherent(world):
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", m, "50000", "0")
+    await eng.tick()
+    (o,) = await world.orders(book=PORTFOLIO)
+    assert o.status == "rejected" and "no pagó nada" in o.status_reason
+
+
+async def test_position_size_is_rounded_down(world):
+    m = world.token(1)
+    world.market.sol = Decimal("187.123456789")  # obliga a redondear el importe de la compra
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    (o,) = await world.orders(book=PORTFOLIO)
+    fee = Decimal(105_000) / Decimal(10**9) * world.market.sol
+    rent = Decimal(1_488_440) / Decimal(10**9) * world.market.sol
+    swap = Decimal(o.decision["compra_usd"])
+    assert swap == (Decimal(10) - fee - rent).quantize(Decimal("0.000001"), rounding="ROUND_DOWN")
+    assert swap + fee + rent <= Decimal(10)
+
+
+async def test_daily_loss_halts_the_portfolio(world):
+    eng = world.build(stop_loss_pct=Decimal(100))
+    await eng.start()
+    for i in range(1, 6):
+        await world.trade("buy", world.token(i), "50000", "500")
+    await eng.tick()
+    for i in range(1, 6):
+        world.quotes.price[mint(i)] = Decimal("0.0075")  # −25 %: unos 13 $ (> 10 % diario)
+    world.clock.advance(seconds=61)
+    await world.heartbeat()
+    await eng.tick()
+    state = await eng.store.state()
+    assert state.state == "HALTED_RISK" and "pérdida del día" in state.reason
+    async with world.sessions() as s:
+        assert "daily_loss" in set(await s.scalars(select(RiskEvent.kind)))
+
+
+async def test_report_charges_failed_fees_to_their_position(world):
+    from copybot.sim.report import build_report
+
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", world.token(2), "50000", "500")
+    world.moves.append((mint(2), Decimal("1.05")))  # esta compra falla y paga comisión
+    await eng.tick()
+    await world.trade("buy", m, "50000", "500")
+    await eng.tick()
+    world.moves.append((m, Decimal("0.9")))  # la primera venta falla y paga comisión
+    await world.trade("sell", m, "50000", "500")
+    await eng.tick()
+    world.clock.advance(seconds=31)
+    await world.heartbeat()
+    await eng.tick()  # el reintento vende
+    (pos_p,) = [p for p in await world.positions(PORTFOLIO) if p.mint == m]
+    (pos_s,) = [p for p in await world.positions(SIGNALS) if p.mint == m]
+    assert pos_p.status == pos_s.status == "closed"
+    report = await build_report(world.sessions, world.clock())
+    fee = Decimal(105_000) / Decimal(10**9) * 200
+    # Cartera: su primera venta falló; esa comisión cuenta en el resultado de la posición.
+    portfolio = report.books[PORTFOLIO]
+    assert portfolio.gross_loss_usd == pos_p.realized_pnl_usd - fee
+    # Libro de señales: su venta salió a la primera; la compra fallida del otro token
+    # resta del total realista, pero no de la comparación posición a posición.
+    comparison = report.comparison
+    assert comparison.realistic_comparable_usd == pos_s.realized_pnl_usd
+    assert comparison.realistic_usd == pos_s.realized_pnl_usd - fee
+
+
+async def test_retried_copy_exit_sells_the_theoretical_copy_at_the_trader_price(world):
+    m = world.token(1)
+    eng = world.build()
+    await eng.start()
+    await world.trade("buy", m, "50000", "500")  # el trader compra a 0,01
+    await eng.tick()
+    world.quotes.price[m] = Decimal("0.02")
+    world.moves.append((m, Decimal("0.9")))  # nuestra primera venta falla por slippage
+    await world.trade("sell", m, "50000", "1000")  # el trader vende a 0,02
+    await eng.tick()
+    world.clock.advance(seconds=31)
+    await world.heartbeat()
+    await eng.tick()  # el reintento vende, ya a 0,018
+    (pos,) = await world.positions(PORTFOLIO)
+    sells = await world.orders(side="sell", book=PORTFOLIO)
+    assert [o.status for o in sells] == ["failed", "filled"]
+    assert pos.status == "closed"
+    # La copia teórica vende al precio del trader (1.000 tokens a 0,02), no al nuestro.
+    assert pos.theoretical_proceeds_usd == 20

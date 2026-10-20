@@ -370,3 +370,19 @@ async def test_non_json_jupiter_answer_is_a_quote_error():
     with pytest.raises(QuoteError, match="inesperada"):
         await client.quote(USDC_MINT, MEME, 10_000_000, 300)
     await client.aclose()
+
+
+async def test_jupiter_error_at_t3_on_a_sale_also_pays_the_fee():
+    class T2ThenBroken:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def quote(self, *args):
+            self.calls += 1
+            if self.calls == 1:
+                return Quote(MEME, USDC_MINT, 500_000_000, 6_000_000, D("0.5"), ("X",), NOW)
+            raise QuoteError("503")
+
+    ex = SimExecutor(T2ThenBroken(), latency_ms=0, slippage_tolerance_bps=300, sleep=Sleeper())
+    r = await ex.sell(MEME, 6, D(500), 0, COSTS)
+    assert not r.ok and "ya se habría enviado" in r.reason and r.fees_usd == COSTS.tx_fee_usd()

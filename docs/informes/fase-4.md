@@ -11,8 +11,8 @@
   - Lleva dos libros: la cartera de 100 $ con todos los límites de riesgo y un libro que copia cada señal con el mismo tamaño.
   - **Perfil de riesgo agresivo, por tu decisión del 20-oct:** 25 $ por posición, hasta 8 posiciones, 10 % de reserva, 20 % de pérdida diaria y 50 % de caída máxima (antes, 10 $, 5, 20 %, 10 % y 25 %). Las pruebas en vivo de este informe se hicieron con el perfil anterior, de 10 $.
   - Se para solo por pérdidas y pasa a solo lectura si el monitor deja de dar datos.
-- **Cumple todos los criterios de aceptación de la Fase 4** fijados en la Fase 1. Lo prueban 267 tests en verde: PnL y costes exactos, slippage, tamaño, stops, caída máxima y pausa automática, rechazo por datos insuficientes, saldos nunca negativos, nunca vende más de lo que tiene, y no duplica nada tras matar el proceso a mitad de una orden.
-- **Dos revisiones adversariales independientes** encontraron 45 problemas reales (34 + 11), todos corregidos con test. Los más graves: un descuadre del diario por redondeo, órdenes que se podían quedar a medias, el valor de una posición tras una venta parcial, y caminos para saltarse la parada por riesgo.
+- **Cumple todos los criterios de aceptación de la Fase 4** fijados en la Fase 1. Lo prueban 276 tests en verde: PnL y costes exactos, slippage, tamaño, stops, caída máxima y pausa automática, rechazo por datos insuficientes, saldos nunca negativos, nunca vende más de lo que tiene, y no duplica nada tras matar el proceso a mitad de una orden.
+- **Dos revisiones adversariales independientes** encontraron 45 problemas reales (34 + 11), todos corregidos; los que cambian el comportamiento, con su test. Los más graves: un descuadre del diario por redondeo, órdenes que se podían quedar a medias, el valor de una posición tras una venta parcial, y caminos para saltarse la parada por riesgo.
 - **En vivo:**
   - detecta las operaciones en **1,0 s** (mediana) y decide en **2,3 s**;
   - con la configuración aprobada no copió ninguna de 53 compras en 2 horas (por los filtros);
@@ -38,7 +38,7 @@
 | `src/copybot/sim/report.py` | **Informe**: resultados de los dos libros, rechazos y fallos agrupados, comparaciones y resultados por trader |
 | `src/copybot/sim_cli.py` | `copybot sim run | status | report | pause | resume | stop` |
 | `src/copybot/monitor_runner.py` | El monitor de la Fase 2, reutilizable dentro de `sim run`; su latido indica si el WebSocket está conectado |
-| `migrations/versions/…_fase_4_simulacion.py` | Tablas nuevas (apartado 2.3) |
+| `migrations/versions/…_fase_4_simulacion.py` | Tablas nuevas (apartado 2.7) |
 
 ### 2.1 Cómo decide, paso a paso
 
@@ -66,7 +66,7 @@ Cada decisión, también los rechazos, queda guardada con sus motivos y los dato
 
 1. **t2**: cotización de Jupiter para **nuestro** tamaño. El tamaño de la posición (25 $; 10 $ con el perfil anterior) lo incluye todo: se compra por ese importe menos la comisión de red y la renta de la cuenta de token.
 2. **Latencia**: se **espera de verdad** 1,5 s (configurable).
-3. **t3**: se vuelve a cotizar y se aplica un recorte supuesto del 0,5 % por MEV (*sandwich*). Si lo recibido queda más de un 3 % por debajo de t2, la orden **falla** como fallaría on-chain y **se paga la comisión**. Si Jupiter no responde en t3, también falla y paga.
+3. **t3**: se vuelve a cotizar. Si t3 queda más de un 3 % por debajo de t2 (el mínimo que acepta la transacción), la orden **falla** como fallaría on-chain y **se paga la comisión**. Si no falla, se aplica un recorte supuesto del 0,5 % por MEV (*sandwich*), pero sin bajar nunca de ese mínimo: si el atacante se llevara más, la transacción fallaría y no ganaría nada. Si Jupiter no responde en t3, la transacción ya se habría enviado: falla y paga la comisión.
 4. Se descuenta la comisión de transferencia del token, si la tiene.
 5. **Costes registrados**: comisión base (5.000 lamports) y prioritaria (100.000), renta de la cuenta de token (≈1,49 M lamports, se recupera al cerrar) y el impacto y la comisión de ruta, que van dentro de la cotización.
 
@@ -87,18 +87,20 @@ Las ventas siguen el mismo proceso. Sin ruta de venta, la posición se marca **i
 | `RUNNING` | Sí | Sí | Sí | En cuanto el monitor da datos, o con `copybot sim resume` |
 | `PAUSED` | No | No | Sí | `copybot sim pause` |
 | `READ_ONLY` | No | No | Sí | Al arrancar, hasta que el monitor da datos. Automático si deja de latir (30 s) o su WebSocket se desconecta. Vuelve a `RUNNING` solo |
-| `HALTED_RISK` | No | Sí | Sí | Automático al superar la pérdida diaria o la caída máxima. `resume` (o reiniciar) solo vuelve a `RUNNING` si ya no se superan |
-| `STOPPED` | — | — | — | `copybot sim stop` o al terminar `sim run` |
+| `HALTED_RISK` | No | Sí | Sí | Automático al llegar al límite de pérdida diaria o de caída máxima. Solo se sale con `copybot sim resume`, que se niega mientras se superen los límites, o con `stop` + `run`, que vuelve a `HALTED_RISK` si se siguen superando. Reiniciar sin más lo mantiene |
+| `STOPPED` | — | — | — | `copybot sim stop`, o al terminar `sim run` (si estaba en `PAUSED` o `HALTED_RISK`, ese estado se conserva) |
 
-### 2.5 Garantías (en la base de datos, no solo en el código)
+### 2.5 Garantías
 
-1. **Sin duplicados.** Cada orden lleva una clave de idempotencia única (versión de la decisión, libro, señal, propósito). Repetir una decisión, reiniciar o reintentar no crea otra orden ni reserva otra vez el dinero.
+Las 1, 3 y 5 las impone la base de datos (claves únicas, restricciones `CHECK` y bloqueo); la 2, sus transacciones; la 4 y la 6, el código del almacén; la 7, un test.
+
+1. **Sin duplicados.** Cada orden lleva una clave de idempotencia única (versión de la decisión, libro, señal, propósito). Repetir una decisión o reiniciar no crea otra orden ni reserva otra vez el dinero. Cada reintento de una venta fallida es, a propósito, una orden nueva con su propia clave.
 2. **Atomicidad.** Estado del sistema (bloqueado para lectura), límites de riesgo, orden y reserva de efectivo se resuelven en la misma transacción, con la caja bloqueada. Dos señales simultáneas no pueden superar los límites (probado con 8 a la vez).
 3. **Sin saldos negativos ni ventas de más.** Restricciones `CHECK`: efectivo y reserva ≥ 0, cantidades ≥ 0, una posición cerrada está vacía. Una venta nunca supera lo que hay.
-4. **Doble entrada exacta.** Los apuntes de cada operación suman cero, redondeados a la escala de las columnas antes de guardarse. Mientras una posición está abierta, sus apuntes suman su coste más la renta; al cerrarla, cero.
+4. **Doble entrada exacta.** Los apuntes de cada operación suman cero (el almacén se niega a guardar un asiento descuadrado), redondeados a la escala de las columnas antes de guardarse. Mientras una posición está abierta, sus apuntes suman su coste más la renta; al cerrarla, cero.
 5. **Un solo motor a la vez** (bloqueo de PostgreSQL, comprobado en cada vuelta).
 6. **Matar el proceso a mitad de una orden** no duplica nada: al arrancar, la orden se da por no ejecutada, se libera la reserva y la señal no se vuelve a decidir.
-7. **Solo simulación.** No hay claves, firma ni envío. El test de «solo simulación» prohíbe en el código cualquier forma de construir o firmar transacciones (incluidos los endpoints de Jupiter que las construyen).
+7. **Solo simulación.** No hay claves, firma ni envío. El test de «solo simulación» bloquea en el código las dependencias y los símbolos habituales para firmar o enviar transacciones, y los endpoints de Jupiter que las construyen.
 
 ### 2.6 Perfil de riesgo agresivo (decidido el 20-oct)
 
@@ -134,7 +136,7 @@ Ten en cuenta que **más riesgo amplifica el resultado en los dos sentidos**: co
 
 ```
 $ uv run pytest
-261 passed
+276 passed
 
 $ uv run ruff check src tests scripts migrations
 All checks passed!
@@ -145,11 +147,11 @@ Los tests que usan base de datos se ejecutan contra PostgreSQL 16 real. Los del 
 | Criterio de la Fase 1 | Tests |
 |---|---|
 | **PnL y costes** | Una compra con todos los costes calculados a mano (comisión de red y prioritaria, renta, impacto, MEV) y el efectivo que queda. Venta proporcional y cierre con la renta devuelta. Resultado realizado exacto. Diario cuadrado incluso con precios de SOL de muchos decimales |
-| **Slippage** | Si el precio se mueve más de un 3 % durante la latencia, la orden falla y paga la comisión. El MEV cuenta para ese límite. Si Jupiter no responde en t3, también falla y paga |
+| **Slippage** | Si el precio se mueve más de un 3 % durante la latencia, la orden falla y paga la comisión. El MEV se lleva como mucho hasta el mínimo de la transacción y por sí solo nunca la hace fallar. Si Jupiter no responde en t3, la compra o la venta falla y paga |
 | **Tamaño de posición** | El tamaño incluye comisión y renta. Redondeo hacia abajo. Con el perfil agresivo, 25 $ por posición y como mucho 3 a la vez por la reserva del 10 % |
 | **Stops** | Stop-loss al 50 %, venta a las 48 h. El stop-loss sigue vigilando aunque haya fallado una venta parcial copiada |
 | **Caída máxima y pérdida diaria (pausa automática)** | Al superar el límite, `HALTED_RISK`: la cartera deja de comprar y el libro de señales sigue. Ni forzar `RUNNING`, ni `stop` + `run`, ni reiniciar se lo saltan. Probado con el perfil anterior y con el agresivo (una pérdida del 12 % ya no para; una del 45 % sí) |
-| **Datos insuficientes o incoherentes** | Señal vieja o recuperada sin hora de bloque, token ilegible, sin precio de SOL (o de hace más de 10 min), Jupiter caído o con respuestas raras: se rechaza con su motivo |
+| **Datos insuficientes o incoherentes** | Señal vieja, recuperada sin hora de bloque o en la que el trader no pagó nada; token ilegible; sin precio de SOL (o de hace más de 10 min); Jupiter caído o con respuestas raras: se rechaza con su motivo |
 | **Saldos no negativos** | La base de datos rechaza un efectivo negativo (restricción `CHECK`) |
 | **Sin ventas superiores a la posición** | Pedir vender 10 veces lo que hay solo vende lo que hay y cierra |
 | ***Kill* a mitad de una orden** | El proceso muere durante la latencia con las dos órdenes en curso. Al reiniciar se dan por no ejecutadas, se libera la reserva y la señal no se vuelve a decidir: una orden por libro, sin duplicados |
@@ -162,14 +164,14 @@ Los tests que usan base de datos se ejecutan contra PostgreSQL 16 real. Los del 
 
 ## 4. Revisión adversarial del código
 
-Antes de cerrar la fase pedí una revisión independiente con varios agentes. Cada uno revisó una dimensión: contabilidad, concurrencia y reinicios, realismo de la simulación, y límites de riesgo con la garantía de solo simulación. Después, otro agente intentó **refutar** cada hallazgo leyendo el código. Se confirmaron **34** (2 de gravedad alta, 13 media y 19 baja) y se refutaron 3. Se corrigieron todos los que afectaban al resultado. Los más importantes:
+Antes de cerrar la fase pedí una revisión independiente con varios agentes. Cada uno revisó una dimensión: contabilidad, concurrencia y reinicios, realismo de la simulación, y límites de riesgo con la garantía de solo simulación. Después, otro agente intentó **refutar** cada hallazgo leyendo el código. Se confirmaron **34** (2 de gravedad alta, 13 media y 19 baja, según los verificadores) y se refutaron 3. Se corrigieron todos. Los más importantes:
 
 | Gravedad | Problema | Corrección (con test) |
 |---|---|---|
 | Alta | Con precios de SOL con muchos decimales (como los de Jupiter), un cierre podía fallar por «apuntes descuadrados» o guardarse descuadrado, porque PostgreSQL redondea cada apunte por separado | Todos los importes se redondean a 18 decimales antes de apuntarlos y el resultado cuadra el asiento |
-| Alta | Una respuesta rara de Jupiter (una página HTML de un cortafuegos, un campo que falta) dejaba la orden a medias con 10 $ reservados, o paraba el motor | Siempre es un error de cotización; ninguna excepción deja órdenes a medias y cada fase del bucle va protegida |
-| Alta | Tras una venta parcial, el valor de la posición seguía siendo el de antes: el patrimonio contaba dos veces lo vendido y podía inflar el máximo (y disparar después paradas falsas) | El valor se ajusta en proporción |
-| Alta | `resume` desde una pausa, o `stop` seguido de `run`, podían volver a comprar con la caída máxima superada | La pérdida diaria y la caída se comprueban dentro de la propia reserva: ningún camino se las salta |
+| Alta | Una respuesta rara de Jupiter (una página HTML de un cortafuegos, un campo que falta) dejaba la orden a medias con 10 $ reservados y podía parar el motor | Siempre es un error de cotización; ninguna excepción deja órdenes a medias y cada fase del bucle va protegida |
+| Media | Tras una venta parcial, el valor de la posición seguía siendo el de antes: el patrimonio contaba dos veces lo vendido y podía inflar el máximo (y disparar después paradas falsas) | El valor se ajusta en proporción |
+| Media | `resume` desde una pausa, o `stop` seguido de `run`, podían volver a comprar con la caída máxima superada | La pérdida diaria y la caída se comprueban dentro de la propia reserva: ningún camino se las salta |
 | Media | El informe solo contaba las posiciones cerradas: las invendibles (las peores) no aparecían (sesgo de supervivencia); las comisiones de las órdenes fallidas no restaban; la copia teórica se comparaba con un conjunto distinto de posiciones | Invendibles como pérdida total, comisiones fallidas restadas, comparación sobre las mismas posiciones |
 | Media | Un segundo `sim run` daba por fallidas las órdenes en curso del primero | Bloqueo para un solo motor |
 | Media | El libro de señales, sin límite, podía retrasar la valoración (y el stop-loss) de la cartera | La cartera se valora primero |
@@ -326,7 +328,7 @@ Jupiter (cotizaciones y precios) y fomoapi.io no han costado nada. Si la simulac
 ## 8. Limitaciones y problemas abiertos
 
 1. **Los filtros deciden casi todo.** Con la configuración aprobada no se copió ninguna de 53 compras reales (apartado 5.1). Es correcto según las reglas, pero así no hay muestra. Decidido contigo: en la interfaz (Fase 6) podrás elegir la liquidez mínima (desde 5.000 $) y si se aceptan tokens con comisión cambiable. Los límites de riesgo seguirán fijos.
-2. **Aún no hay ninguna operación simulada en vivo con resultado.** La ejecución está probada con tests y con respuestas reales de Jupiter grabadas, pero falta verla funcionar durante días con dinero simulado (Fase 8).
+2. **Aún no hay ninguna operación simulada en vivo con resultado.** La ejecución está probada con tests sobre cotizaciones simuladas; la lectura de Jupiter y los filtros de mercado, con respuestas reales grabadas; y la cadena completa, en la prueba en vivo de una hora (apartado 5.2). Falta verla funcionar durante días con dinero simulado (Fase 8).
 3. **La prueba en vivo depende de que el proceso esté encendido.** En este entorno de la nube se corta al terminar la sesión. Una prueba de una semana necesita un servidor o un ordenador siempre encendido (Fase 7).
 4. **Valoración congelada si Jupiter falla mucho rato.** La posición conserva su última valoración buena, y el registro del patrimonio guarda su antigüedad. No se pasa a 0 automáticamente para no provocar paradas falsas durante una caída de Jupiter.
 5. **La copia teórica solo existe para las compras que llegamos a ejecutar.** No mide lo que se pierde por las compras que fallan o se rechazan. Por eso, el «coste de llegar tarde» está algo subestimado.

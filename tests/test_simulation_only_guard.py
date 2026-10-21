@@ -35,6 +35,17 @@ FORBIDDEN_PATTERNS = [
     r"/v\d+/swap\b",
     r"/ultra/",
     r"/execute\b",
+    # Binance: órdenes, cuenta y cualquier petición firmada (clave API o HMAC). Los datos
+    # públicos de mercado (/api/v3/klines, exchangeInfo, ticker…) están permitidos.
+    r"/api/v\d+/order",
+    r"/api/v\d+/account",
+    r"/api/v\d+/myTrades",
+    r"/sapi/",
+    r"/fapi/",
+    r"/dapi/",
+    r"X-MBX-APIKEY",
+    r"\bhmac\b",
+    r"api_?secret",
 ]
 
 # Bibliotecas que permiten firmar transacciones de Solana.
@@ -89,5 +100,24 @@ def test_guard_allows_read_only_quotes_and_prices():
         "https://api.jup.ag/swap/v1/quote",
         "https://lite-api.jup.ag/swap/v1/quote",
         "https://lite-api.jup.ag/price/v3",
+        "https://data-api.binance.vision/api/v3/klines",
+        "https://api.binance.com/api/v3/exchangeInfo",
+        "https://api.binance.com/api/v3/ticker/24hr",
+        "https://api.binance.com/api/v3/ticker/bookTicker",
     ):
         assert not _flagged(url), url
+
+
+def test_guard_blocks_binance_trading_and_signed_requests():
+    for text in (
+        "https://api.binance.com/api/v3/order",
+        "https://api.binance.com/api/v3/order/test",
+        "https://api.binance.com/api/v3/account",
+        "https://api.binance.com/api/v3/myTrades",
+        "https://api.binance.com/sapi/v1/capital/withdraw/apply",
+        "https://fapi.binance.com/fapi/v1/order",
+        'headers={"X-MBX-APIKEY": key}',
+        "hmac.new(secret, query, sha256)",
+        "BINANCE_API_SECRET",
+    ):
+        assert _flagged(text), text

@@ -48,8 +48,19 @@ FORBIDDEN_PATTERNS = [
     r"api_?secret",
 ]
 
-# Bibliotecas que permiten firmar transacciones de Solana.
-FORBIDDEN_DEPENDENCIES = {"solana", "solders", "anchorpy", "solana-py", "pynacl", "ed25519"}
+# Bibliotecas que permiten firmar transacciones de Solana u operar en exchanges.
+FORBIDDEN_DEPENDENCIES = {
+    "solana",
+    "solders",
+    "anchorpy",
+    "solana-py",
+    "pynacl",
+    "ed25519",
+    "ccxt",
+    "python-binance",
+    "binance-connector",
+    "binance-sdk-spot",
+}
 
 
 def test_no_signing_or_sending_code_in_src():

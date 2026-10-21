@@ -14,6 +14,7 @@ from copybot.backtest.copy import PORTFOLIO, SIGNALS, CopyPosition, CopyResult
 from copybot.backtest.data import Selection
 from copybot.backtest.references import RefParams, RefResult
 from copybot.backtest.stats import TradeStats, max_drawdown_pct, trade_stats
+from copybot.config import RiskLimits
 
 ZERO = Decimal(0)
 
@@ -22,6 +23,7 @@ ZERO = Decimal(0)
 class Scenario:
     name: str
     result: CopyResult
+    limits: RiskLimits | None = None
 
 
 @dataclass(frozen=True)
@@ -52,15 +54,23 @@ def book_stats(positions: list[CopyPosition], seed: int) -> TradeStats:
     return trade_stats([p.pnl_usd for p in done], [p.return_pct for p in done], seed=seed)
 
 
-def data_hash(result: CopyResult, selection: list[Selection]) -> str:
-    """Huella de los datos y parámetros: el mismo valor implica el mismo informe."""
+def data_hash(scenarios: list[Scenario], selection: list[Selection]) -> str:
+    """Huella de los datos y parámetros de todos los escenarios: el mismo valor implica
+    los mismos resultados."""
     payload = {
-        "params": {k: str(v) for k, v in result.params.__dict__.items()},
-        "periodo": [result.start, result.end],
-        "seleccion": [(s.wallet, str(s.score)) for s in selection],
-        "posiciones": [
-            (p.book, p.wallet, p.mint, p.opened_at, str(p.entry_price), str(p.pnl_usd))
-            for p in result.positions
+        "seleccion": [(s.wallet, str(s.score), s.eligible) for s in selection],
+        "escenarios": [
+            {
+                "nombre": sc.name,
+                "params": {k: str(v) for k, v in sc.result.params.__dict__.items()},
+                "limites": None if sc.limits is None else sc.limits.model_dump(mode="json"),
+                "periodo": [sc.result.start, sc.result.end],
+                "posiciones": [
+                    (p.book, p.wallet, p.mint, p.opened_at, str(p.entry_price), str(p.pnl_usd))
+                    for p in sc.result.positions
+                ],
+            }
+            for sc in scenarios
         ],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
@@ -73,6 +83,7 @@ def render(
     selected: list[str],
     select_as_of: datetime | None,
     select_window: int | None,
+    universe: str | None = None,
     lookups: int,
     missing: int,
     seed: int,
@@ -94,6 +105,14 @@ def render(
             f"- Selección **fuera de muestra**: traders elegidos con sus datos hasta el "
             f"{select_as_of:%Y-%m-%d} (ventana de {select_window} días); se copian después."
         )
+        if universe == "actividad":
+            out.append("- Universo: traders descubiertos por su actividad, no por lo que ganaban.")
+        elif universe is not None:
+            out.append(
+                f"- Universo: {universe}. **Cota optimista**: la leaderboard de FOMO se "
+                "capturó el 19-oct con el ranking de los 30 días anteriores, así que se elige "
+                "sabiendo quién ganó durante el periodo copiado."
+            )
     else:
         out.append("- Traders elegidos a mano (no es una selección fuera de muestra).")
     out += [
@@ -101,7 +120,8 @@ def render(
         f"{main.params.delay[1]} s después (hasta 60 s si no hubo ninguna)",
         f"- Consultas nuevas a Helius: {lookups} (≈{lookups * 10:,} créditos); precios que "
         f"faltaban en caché sin consultar: {missing}",
-        f"- Semilla del bootstrap: {seed}; huella de los datos: `{data_hash(main, selection)}`",
+        f"- Semilla del bootstrap: {seed}; huella de los datos: "
+        f"`{data_hash(scenarios, selection)}`",
         "",
         "## Traders",
         "",
@@ -125,9 +145,9 @@ def render(
     out += ["", "## Resultados por escenario", ""]
     out.append(
         "| Escenario | Libro | Operaciones | Resultado | Media por operación (IC 95 %) "
-        "| Acierto | Profit factor | P(media > 0) |"
+        "| Acierto | Profit factor | P(media > 0) | Aviso |"
     )
-    out.append("|---|---|---|---|---|---|---|---|")
+    out.append("|---|---|---|---|---|---|---|---|---|")
     for sc in scenarios:
         for book, label in ((SIGNALS, "señales"), (PORTFOLIO, "cartera")):
             st = book_stats(sc.result.book(book), seed)
@@ -140,18 +160,22 @@ def render(
                 f"| {sc.name} | {label} | {st.n} | {_usd(st.total_usd)} | {ci} | "
                 f"{'—' if st.win_rate is None else f'{st.win_rate:.0%}'} | "
                 f"{'—' if st.profit_factor is None else f'{st.profit_factor:.2f}'} | "
-                f"{'—' if st.prob_mean_positive is None else f'{st.prob_mean_positive:.0%}'} |"
+                f"{'—' if st.prob_mean_positive is None else f'{st.prob_mean_positive:.0%}'} | "
+                f"{st.warning or '—'} |"
             )
     out.append("")
     for sc in scenarios:
         r = sc.result
         final = r.equity_curve[-1][1] if r.equity_curve else r.initial_usd
         halts = "; ".join(f"{_date(t)}: {why}" for t, why in r.halts) or "ninguna"
-        warning = book_stats(r.book(SIGNALS), seed).warning
         out.append(
             f"- **{sc.name}**: cartera {r.initial_usd:,.0f} $ → {final:,.2f} $ "
             f"(caída máxima {max_drawdown_pct(r.equity_curve):.1f} %); paradas: {halts}."
-            + (f" Aviso: {warning}." if warning else "")
+            + (
+                f" {r.unpriced_exits} ventas al último precio visto (el suyo no se consultó)."
+                if r.unpriced_exits
+                else ""
+            )
         )
 
     if references or coverage:
@@ -182,29 +206,38 @@ def render(
         )
     out += ["", "## Por trader (libro de señales)", ""]
     out.append(
-        "| Trader | Operaciones | Realista | Teórica | Entrada frente al trader (mediana) "
-        "| Media por operación |"
+        "| Trader | Operaciones | Realista | Teórica (mismas operaciones) "
+        "| Entrada frente al trader (mediana) | Media por operación | Aviso |"
     )
-    out.append("|---|---|---|---|---|---|")
+    out.append("|---|---|---|---|---|---|---|")
     per: dict[str, list[CopyPosition]] = defaultdict(list)
     for p in sig:
         per[p.wallet].append(p)
     for wallet in sorted(per, key=lambda w: sum((p.pnl_usd for p in per[w]), ZERO)):
         ps = per[wallet]
-        theo = [p.theo_pnl_usd for p in ps if p.theo_pnl_usd is not None]
+        both = [p for p in ps if p.status != "open" and p.theo_pnl_usd is not None]
+        pair = (
+            f"{_usd(sum((p.pnl_usd for p in both), ZERO))} | "
+            f"{_usd(sum((p.theo_pnl_usd for p in both), ZERO))} ({len(both)} op.)"  # type: ignore[misc]
+            if both
+            else "— | —"
+        )
         slips = [float(p.entry_slippage_pct) for p in ps if p.entry_slippage_pct is not None]
         st = book_stats(ps, seed)
         out.append(
-            f"| `{_short(wallet)}` | {st.n} | {_usd(sum((p.pnl_usd for p in ps), ZERO))} | "
-            f"{_usd(sum(theo, ZERO)) if theo else '—'} | "
+            f"| `{_short(wallet)}` | {st.n} | {pair} | "
             f"{f'{statistics.median(slips):+.1f} %' if slips else '—'} | "
-            f"{_pct(st.mean_return_pct)} |"
+            f"{_pct(st.mean_return_pct)} | {st.warning or '—'} |"
         )
     if main.skipped:
         out += ["", "## Compras no copiadas", ""]
         for why, n in sorted(main.skipped.items(), key=lambda kv: -kv[1]):
             out.append(f"- {n} × {why}")
     return "\n".join(out) + "\n"
+
+
+def _trades(positions: list[CopyPosition]) -> int:
+    return sum(1 + len(p.exits) for p in positions)
 
 
 def _references_section(
@@ -227,7 +260,7 @@ def _references_section(
         ret = (final / r.initial_usd - 1) * 100
         out.append(
             f"| copy-trading: {sc.name} | memecoins | {final:,.2f} $ | {_pct(ret)} | "
-            f"{max_drawdown_pct(r.equity_curve):.1f} % | {len(r.book(PORTFOLIO))} | — |"
+            f"{max_drawdown_pct(r.equity_curve):.1f} % | {_trades(r.book(PORTFOLIO))} | — |"
         )
     for base, doubled in sorted(refs, key=lambda pair: -pair[0].final_usd):
         out.append(
@@ -247,11 +280,13 @@ def _references_section(
             "BTC, ETH de Wormhole, SPYx de xStocks, que solo sigue al S&P 500 con la bolsa "
             "abierta). La tendencia decide con el precio de una hora y opera en la siguiente."
         )
+    compared = {base.asset for base, _ in refs}
     for cov in coverage:
         if cov.hours_with_price < cov.hours:
             out.append(
                 f"- {cov.asset}: precio en {cov.hours_with_price} de {cov.hours} horas"
-                + (" (sin datos: no se compara)" if not cov.hours_with_price else "")
+                + ("" if cov.asset in compared else " (demasiados huecos: no se compara)")
                 + "."
             )
+    out.append("- Operaciones: compras y ventas (en el copy-trading, cada entrada y cada salida).")
     return out

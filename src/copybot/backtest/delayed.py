@@ -47,6 +47,11 @@ EXTEND_TO_S = 60
 # Precios de las primeras operaciones de la ventana que se promedian (mediana).
 FIRST_SWAPS = 5
 PAGE_SIZE = 100  # lo máximo por página: cuesta lo mismo que una más corta
+# Operaciones más pequeñas no cuentan: en ellas pesan demasiado las propinas a los
+# validadores y las comisiones de los bots, que inflan el precio de compra.
+MIN_QUOTE = {"SOL": Decimal("0.05"), "USDC": Decimal(5), "USDT": Decimal(5)}
+# Una ventana que acaba menos de esto antes de ahora aún puede recibir operaciones.
+SETTLE_S = 120
 MAX_PAGES = 3  # por tramo de ventana
 USD_QUOTES = frozenset({"USDC", "USDT"})
 
@@ -77,7 +82,8 @@ class SwapPrice:
 def swap_prices(
     txs: Iterable[dict[str, Any]], mint: str, at: int, relayers: frozenset[str]
 ) -> list[SwapPrice]:
-    """Precios de las compraventas de ``mint`` (de cualquier usuario) en ``txs``."""
+    """Precios de las compraventas de ``mint`` (de cualquier usuario) en ``txs``. Una
+    sola por transacción (si firman las dos partes de un intercambio, cuenta la primera)."""
     out = []
     for tx in txs:
         block_time = tx.get("blockTime")
@@ -91,12 +97,13 @@ def swap_prices(
         for ev in events:
             if ev.mint != mint or ev.kind not in (EventKind.BUY, EventKind.SELL):
                 continue
-            if ev.confidence == Confidence.LOW:
+            if ev.confidence == Confidence.LOW or ev.quote_symbol not in MIN_QUOTE:
                 continue
             price = ev.price_in_quote
-            if price is None or price <= 0 or ev.quote_symbol not in USD_QUOTES | {"SOL"}:
+            if price is None or price <= 0 or abs(ev.quote_delta) < MIN_QUOTE[ev.quote_symbol]:
                 continue
             out.append(SwapPrice(int(block_time) - at, ev.quote_symbol, price))
+            break
     return sorted(out, key=lambda p: p.offset_s)
 
 
@@ -132,7 +139,12 @@ class DelayedPrices:
         self.sol = sol if sol is not None else PoolPrices(sessions, rpc, SOL)
         self._clock = clock
         self._pages = 0
-        self.missing = 0  # pedidas sin poder consultar (sin conexión permitida)
+        self._missing: set[tuple[str, int, int, int]] = set()
+
+    @property
+    def missing(self) -> int:
+        """Precios distintos que hacían falta y no se pudieron consultar."""
+        return len(self._missing)
 
     @property
     def lookups(self) -> int:
@@ -156,8 +168,9 @@ class DelayedPrices:
             cached = await s.get(DelayedPrice, (mint, at, lo, hi))
         if cached is not None:
             return cached
-        if not fetch or self._rpc is None:
-            self.missing += 1
+        settled = at + max(hi, extend_to) <= self._clock().timestamp() - SETTLE_S
+        if not fetch or self._rpc is None or not settled:
+            self._missing.add((mint, at, lo, hi))
             return None
         prices, pages = await self._swaps(mint, at, lo, hi)
         window_end = hi
@@ -167,6 +180,10 @@ class DelayedPrices:
             window_end = extend_to
         sol_usd = await self.sol.at(at + lo, fetch=True)
         price, used = usd_price(prices, sol_usd)
+        if prices and not used:
+            # Hubo operaciones, pero en SOL y sin precio de SOL: no es «nadie operó».
+            self._missing.add((mint, at, lo, hi))
+            return None
         row = {
             "mint": mint,
             "at": at,

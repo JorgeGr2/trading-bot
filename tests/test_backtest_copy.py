@@ -39,6 +39,7 @@ class Prices:
     """Precio retrasado por (mint, instante); ``None`` = nadie operó."""
 
     def __init__(self) -> None:
+        # Sin clave: no está en caché. Con ``None``: nadie operó el token.
         self.at: dict[tuple[str, int], D | None] = {}
         self.asked: list[tuple[str, int, tuple[int, int]]] = []
 
@@ -107,12 +108,20 @@ async def test_max_hold_and_write_off():
     prices.at[("M1", T0)] = D("0.01")
     prices.at[("M1", T0 + 48 * 3600)] = D("0.005")  # a las 48 h vale la mitad
     prices.at[("M2", T0 + 10)] = D("0.01")
-    # M2: a las 48 h nadie lo opera → perdido
-    events = [ev("buy", 0, "1000", "10"), ev("buy", 10, "1000", "10", mint="M2", n=1)]
+    prices.at[("M2", T0 + 10 + 48 * 3600)] = None  # a las 48 h nadie lo opera → perdido
+    prices.at[("M3", T0 + 20)] = D("0.01")  # M3: su precio a las 48 h no se consultó
+    events = [
+        ev("buy", 0, "1000", "10"),
+        ev("buy", 10, "1000", "10", mint="M2", n=1),
+        ev("buy", 20, "1000", "10", mint="M3", n=2),
+    ]
     result = await run(events, prices, end=5 * 86400)
     by_mint = {p.mint: p for p in result.book(SIGNALS)}
     assert by_mint["M1"].exits[0].reason == "max_hold" and by_mint["M1"].pnl_usd == -5
     assert by_mint["M2"].status == "written_off" and by_mint["M2"].pnl_usd == -10
+    # No se inventa una pérdida total: se vende al último precio visto y se cuenta.
+    assert by_mint["M3"].status == "closed" and by_mint["M3"].pnl_usd == 0
+    assert result.unpriced_exits == 2  # en los dos libros
 
 
 async def test_stop_loss_on_an_observed_price():
@@ -174,3 +183,59 @@ async def test_same_inputs_same_result():
     a = await run(events, prices)
     b = await run(list(reversed(events)), prices)
     assert [(p.book, p.pnl_usd) for p in a.positions] == [(p.book, p.pnl_usd) for p in b.positions]
+
+
+async def test_stop_loss_uses_the_cost_of_what_is_left():
+    prices = Prices()
+    prices.at[("M1", T0)] = D("0.01")
+    prices.at[("M1", T0 + 50)] = D("0.01")
+    prices.at[("M1", T0 + 90)] = D("0.015")
+    events = [
+        ev("buy", 0, "1000", "10"),
+        ev("sell", 50, "750", "7.5"),  # vende tres cuartas partes sin ganar ni perder
+        ev("buy", 90, "1000", "15", wallet="Other", n=2),  # luego sube un 50 %
+    ]
+    result = await run(events, prices)
+    pos = next(p for p in result.book(SIGNALS) if p.wallet == W)
+    # El resto no salta por stop-loss al subir (antes contaba el coste de lo vendido).
+    assert [e.reason for e in pos.exits] == ["copia", "max_hold"]
+    assert pos.exits[0].tokens == 750
+
+
+async def test_same_second_events_keep_the_database_order():
+    prices = Prices()
+    prices.at[("M1", T0)] = D("0.01")
+    # Compra y venta en el mismo segundo: el orden lo da la carga (bloque e índice).
+    events = [ev("buy", 0, "1000", "10", n=0), ev("sell", 0, "1000", "10", n=1)]
+    result = await run(events, prices)
+    (pos,) = result.book(SIGNALS)
+    assert pos.exits[0].reason == "copia"
+
+
+async def test_daily_loss_counts_from_before_the_first_event_of_the_day():
+    day = 86400
+    prices = Prices()
+    events = []
+    for i in range(2):
+        prices.at[(f"M{i}", T0 + i)] = D("0.01")
+        events.append(ev("buy", i, "1000", "10", mint=f"M{i}", n=i))
+    # Al día siguiente, el primer evento es una caída a la mitad de los dos tokens.
+    for i in range(2):
+        prices.at[(f"M{i}", T0 + day + i)] = D("0.005")
+        events.append(ev("buy", day + i, "1000", "5", mint=f"M{i}", wallet="Other", n=10 + i))
+    params = CopyParams(**{**FREE.__dict__, "stop_loss_pct": D(100)})
+    result = await run(events, prices, params, end=2 * day)
+    assert result.halts and "pérdida del día" in result.halts[0][1]
+    assert result.equity_curve[0] == (T0, D(100))  # la curva empieza en el capital inicial
+
+
+async def test_cost_multiplier_scales_network_fees_too():
+    prices = Prices()
+    prices.at[("M1", T0)] = D("0.01")
+    base = CopyParams(size_usd=D(10), impact_pct=D(0), mev_bps=0, rent_lamports=0)
+    double = CopyParams(**{**base.__dict__, "cost_multiplier": D(2)})
+    a = (await run([ev("buy", 0, "1000", "10")], prices, base)).book(SIGNALS)[0]
+    b = (await run([ev("buy", 0, "1000", "10")], prices, double)).book(SIGNALS)[0]
+    fee = D(105_000) / D(10**9) * 200
+    assert a.exits[0].tokens == (10 - fee) / D("0.01")
+    assert b.exits[0].tokens == (10 - 2 * fee) / D("0.01")

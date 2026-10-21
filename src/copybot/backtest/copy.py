@@ -13,7 +13,8 @@ Para cada compra del trader (en orden cronológico):
 Salidas: la misma fracción que vende el trader (con sus saldos), stop-loss cuando un
 precio observado lo dispara, venta forzada a las 48 h y valoración de lo que siga
 abierto al final del periodo. Si a la hora de vender no hay ninguna operación en el
-token (nadie compra), la posición se da por perdida.
+token (nadie compra), la posición se da por perdida. Si el precio no se pudo consultar
+(tope de consultas), se vende al último precio observado y se cuenta aparte.
 
 **Copia teórica**: las mismas operaciones a los precios exactos del trader y sin costes.
 La diferencia con la realista es lo que cuesta llegar tarde.
@@ -55,7 +56,8 @@ class CopyParams:
     stop_loss_pct: Decimal = Decimal(50)
     max_hold_hours: int = 48
     exit_dust_fraction: Decimal = Decimal("0.02")
-    # Multiplica impacto y MEV (sensibilidad: 0,5 = la mitad de costes, 2 = el doble).
+    # Multiplica impacto, MEV y comisiones de red (sensibilidad: 0,5 = la mitad, 2 = el
+    # doble). La renta no: se recupera al cerrar.
     cost_multiplier: Decimal = ONE
     # Precio de SOL si no se puede estimar de las operaciones (solo para las comisiones).
     fallback_sol_usd: Decimal = Decimal(150)
@@ -104,6 +106,7 @@ class CopyPosition:
     opened_at: int
     tokens: Decimal
     invested_usd: Decimal  # todo lo pagado (comisiones y renta incluidas)
+    basis_usd: Decimal  # coste de lo que queda (sin renta), para el stop-loss
     trader_entry_price: Decimal | None
     entry_price: Decimal  # precio retrasado pagado (antes de nuestros costes)
     rent_usd: Decimal
@@ -151,6 +154,7 @@ class CopyResult:
     equity_curve: list[tuple[int, Decimal]]  # cartera: (hora, patrimonio)
     halts: list[tuple[int, str]]
     initial_usd: Decimal
+    unpriced_exits: int = 0  # ventas al último precio por no poder consultar el suyo
 
     def book(self, name: str) -> list[CopyPosition]:
         return [p for p in self.positions if p.book == name]
@@ -184,7 +188,8 @@ class CopyBacktest:
         return Decimal(lamports) / LAMPORTS_PER_SOL * sol_usd
 
     def _tx_fee(self, sol_usd: Decimal) -> Decimal:
-        return self._lamports(self.p.base_fee_lamports + self.p.priority_fee_lamports, sol_usd)
+        lamports = self.p.base_fee_lamports + self.p.priority_fee_lamports
+        return self._lamports(lamports, sol_usd) * self.p.cost_multiplier
 
     def _tfee(self, mint: str) -> Decimal:
         return Decimal(self._fee_bps.get(mint, 0)) / 10_000
@@ -216,6 +221,7 @@ class CopyBacktest:
         """Copia los eventos de ``[start, end)``. Los anteriores solo sirven para conocer
         el saldo del trader (y así la fracción que vende)."""
         run = _Run(self, start, end)
+        await run.begin()
         for ev in sorted(events, key=lambda e: (e.at, e.order)):
             await run.event(ev)
         await run.finish()
@@ -228,6 +234,7 @@ class CopyBacktest:
             equity_curve=run.curve,
             halts=run.halts,
             initial_usd=self.limits.virtual_capital_usd,
+            unpriced_exits=run.unpriced_exits,
         )
 
 
@@ -248,6 +255,7 @@ class _Run:
         self.halted = False
         self.halts: list[tuple[int, str]] = []
         self.curve: list[tuple[int, Decimal]] = []
+        self.unpriced_exits = 0
 
     # --- Cartera ----------------------------------------------------------------------------
 
@@ -264,17 +272,29 @@ class _Run:
             day_start_equity_usd=self.day_start,
         )
 
-    def roll(self, now: int) -> None:
+    async def begin(self) -> None:
+        self.day = datetime.fromtimestamp(self.start, UTC).date()
+        self.curve.append((self.start, self.cash))
+
+    def new_day(self, now: int) -> None:
+        """Al empezar un día, su patrimonio de partida es el de antes de su primer
+        evento (y antes de las ventas forzadas que ese evento destape)."""
         today = datetime.fromtimestamp(now, UTC).date()
-        equity = self.state().equity_usd
         if self.day != today:
-            self.day, self.day_start = today, equity
+            self.day, self.day_start = today, self.state().equity_usd
+
+    def check(self, now: int) -> None:
+        """Máximo, paradas por riesgo y punto de la curva con el patrimonio actual."""
+        equity = self.state().equity_usd
         self.peak = max(self.peak, equity)
         reasons = halt_reasons(self.state(), self.bt.limits)
         if reasons and not self.halted:
             self.halted = True
             self.halts.append((now, "; ".join(d for _, d in reasons)))
-        self.curve.append((now, equity))
+        if self.curve and self.curve[-1][0] == now:
+            self.curve[-1] = (now, equity)
+        else:
+            self.curve.append((now, equity))
 
     # --- Eventos ----------------------------------------------------------------------------
 
@@ -284,14 +304,16 @@ class _Run:
         self.balance[key] += ev.amount if ev.kind in ("buy", "transfer_in") else -ev.amount
         if ev.at < self.start or ev.at >= self.end or ev.kind not in ("buy", "sell"):
             return
+        self.new_day(ev.at)
         await self.expire(ev.at)
         held = any(p.mint == ev.mint for p in self.open.values())
         if ev.kind == "sell" and not held:
-            self.roll(ev.at)
+            self.check(ev.at)
             return  # nada que vender ni que vigilar: ni siquiera se pide el precio
         trader_price = await self.bt._trader_price(ev)
         if trader_price is not None:
             await self.observe(ev.mint, ev.at, trader_price)
+        self.check(ev.at)  # una caída que dispara la parada impide ya esta compra
         if ev.kind == "buy":
             await self.enter(ev, trader_price)
         else:
@@ -300,28 +322,29 @@ class _Run:
                 pos = self.open.get((book, ev.wallet, ev.mint))
                 if pos is not None:
                     await self.close(pos, ev.at, "copia", fraction, theo_price=trader_price)
-        self.roll(ev.at)
+        self.check(ev.at)
 
     async def observe(self, mint: str, at: int, price: Decimal) -> None:
         """Un precio observado del token: valora las posiciones y vigila el stop-loss."""
         threshold = ONE - self.p.stop_loss_pct / 100
         for pos in [p for p in self.open.values() if p.mint == mint]:
             pos.last_price = price
-            if pos.value() <= (pos.invested_usd - pos.rent_usd) * threshold:
+            if pos.value() <= pos.basis_usd * threshold:
                 await self.close(pos, at, "stop_loss")
 
     async def expire(self, now: int) -> None:
         """Venta forzada de lo que lleva más de ``max_hold_hours`` abierto."""
         limit = self.p.max_hold_hours * 3600
-        for pos in list(self.open.values()):
+        for pos in sorted(self.open.values(), key=lambda p: p.opened_at):
             if pos.opened_at + limit <= now:
                 await self.close(pos, pos.opened_at + limit, "max_hold")
 
     async def finish(self) -> None:
+        self.new_day(self.end)
         await self.expire(self.end)
         for pos in list(self.open.values()):
             await self.close(pos, self.end, "final")
-        self.roll(self.end)
+        self.check(self.end)
 
     # --- Compras y ventas -------------------------------------------------------------------
 
@@ -359,6 +382,7 @@ class _Run:
             if existing is not None:  # el trader vuelve a comprar (libro de señales)
                 existing.tokens += tokens
                 existing.invested_usd += p.size_usd
+                existing.basis_usd += p.size_usd
                 existing.last_price = price
                 if existing.theo_tokens is not None and theo is not None:
                     existing.theo_tokens += theo
@@ -373,6 +397,7 @@ class _Run:
                 opened_at=ev.at,
                 tokens=tokens,
                 invested_usd=p.size_usd,
+                basis_usd=p.size_usd - rent,
                 trader_entry_price=trader_price,
                 entry_price=price,
                 rent_usd=rent,
@@ -397,8 +422,12 @@ class _Run:
         bt, p = self.bt, self.p
         window = p.delay if reason in ("copia", "stop_loss") else (0, 600)
         quote = await bt._prices.quote(pos.mint, at, window)
-        price = None if quote is None else quote.price_usd
         whole = fraction >= ONE or (ONE - fraction) <= p.exit_dust_fraction
+        if quote is None and reason in ("max_hold", "final"):
+            # No se pudo consultar (no es que nadie operara): último precio observado.
+            self.unpriced_exits += 1
+            quote = Quote(pos.last_price, None)
+        price = None if quote is None else quote.price_usd
         if price is None:
             if reason in ("copia", "stop_loss"):
                 return  # nadie operó: lo resolverán la venta forzada o el final
@@ -417,6 +446,7 @@ class _Run:
         pos.exits.append(Exit(at, reason, tokens, price, proceeds))
         pos.last_price = price
         pos.tokens -= tokens
+        pos.basis_usd = ZERO if whole else pos.basis_usd * (ONE - fraction)
         if pos.book == PORTFOLIO:
             self.cash += proceeds
         self._theo_sell(pos, ONE if whole else fraction, theo_price or price)

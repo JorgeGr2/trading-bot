@@ -9,14 +9,16 @@ reciben una moneda y entregan la otra.
 Se toma una muestra al empezar cada hora (páginas de hasta 100 transacciones del pool
 desde la hora en punto, 10 créditos cada una, hasta reunir unos pocos swaps) y se guarda
 en ``backtest_price_bars`` como vela de muestra: apertura, máximo, mínimo y cierre **de
-los swaps observados**, no de la hora entera. El precio de la hora es la apertura (el
-primer swap desde la hora en punto) y el de un instante, la interpolación lineal entre las
-dos horas que lo rodean (SOL se mueve en torno a un 0,5 % por hora: el error es pequeño
-frente a lo que se quiere medir).
+los swaps observados**, no de la hora entera, sin los que se alejan más de un 3 % de la
+mediana de la muestra. El precio de la hora es la apertura (el primer swap válido desde
+la hora en punto) y el de un instante, la interpolación lineal entre las dos horas que lo
+rodean (SOL se mueve en torno a un 0,5 % por hora: el error es pequeño frente a lo que se
+quiere medir).
 """
 
 from __future__ import annotations
 
+import statistics
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -85,6 +87,9 @@ MIN_SWAPS = 3
 PAGE_SIZE = 100
 MAX_PAGES = 3  # por pool: en los pools con más tráfico, casi todo son bots sin swap
 MIN_USDC = Decimal(1)  # swaps más pequeños: el redondeo pesa demasiado
+# Swaps a más de esto de la mediana de la muestra no cuentan: una transacción que cambia y
+# además añade liquidez en el mismo pool deja unos saldos netos sin sentido como precio.
+MAX_DEVIATION = Decimal("0.03")
 
 
 @dataclass(frozen=True)
@@ -133,10 +138,13 @@ class PoolPrices:
         sessions: async_sessionmaker[AsyncSession],
         rpc: MintHistoryRpc | None,
         asset: Asset = SOL,
+        *,
+        max_lookups: int | None = None,
     ) -> None:
         self._sessions = sessions
         self._rpc = rpc
         self.asset = asset
+        self._max = max_lookups
         self._key = f"{asset.name}/USD"
         self.lookups = 0  # consultas a Helius hechas
         self._memo: dict[int, Decimal | None] = {}
@@ -185,7 +193,8 @@ class PoolPrices:
         if bar is not None:
             self._memo[hour] = bar.open
             return bar.open
-        if not fetch or self._rpc is None:
+        capped = self._max is not None and self.lookups >= self._max
+        if not fetch or self._rpc is None or capped:
             return None  # sin memorizar: otra llamada con permiso sí puede pedirla
         swaps: list[PoolSwap] = []
         for pool in self.asset.pools:
@@ -212,7 +221,8 @@ class PoolPrices:
             self._memo[hour] = None
             return None
         swaps.sort(key=lambda s: s.at)
-        prices = [s.price for s in swaps]
+        middle = statistics.median(s.price for s in swaps)
+        prices = [s.price for s in swaps if abs(s.price / middle - 1) <= MAX_DEVIATION]
         row = {
             "source": SOURCE,
             "asset": self._key,

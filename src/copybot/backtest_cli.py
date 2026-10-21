@@ -19,10 +19,13 @@ from pathlib import Path
 
 from copybot.backtest.copy import CopyBacktest, CopyParams
 from copybot.backtest.data import (
+    UNIVERSES,
     DelayedQuotes,
     load_events,
     select_traders,
     transfer_fees,
+    universe,
+    with_defaults,
 )
 from copybot.backtest.delayed import DelayedPrices
 from copybot.backtest.poolprice import ASSETS, HOUR, SOL, PoolPrices
@@ -32,13 +35,19 @@ from copybot.config import RiskLimits, Settings
 from copybot.solana.addresses import validate_address
 from copybot.traders_cli import context, parse_as_of
 
-CONSERVATIVE = RiskLimits(
+# Perfiles con los valores del código (el entorno y ``.env`` no los cambian).
+AGGRESSIVE = with_defaults(RiskLimits)
+CONSERVATIVE = with_defaults(
+    RiskLimits,
     max_position_usd=10,
     max_open_positions=5,
     min_cash_reserve_pct=20,
     max_daily_loss_pct=10,
     max_drawdown_pct=25,
 )
+# El precio de salida al final se mira hasta 600 s después: ese rato ya debe haber pasado.
+SETTLE_S = 600
+MIN_COVERAGE = 0.9  # horas con precio necesarias para comparar con una referencia
 
 
 def add_parsers(sub: argparse._SubParsersAction) -> None:
@@ -53,6 +62,13 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     c.add_argument("--until", help="fin del periodo copiado (por defecto, ahora)")
     c.add_argument("--wallet", action="append", default=[], help="copiar estas wallets")
     c.add_argument("--top", type=int, default=10, help="como mucho N traders seleccionados")
+    c.add_argument(
+        "--universe",
+        choices=UNIVERSES,
+        default="actividad",
+        help="entre qué traders se elige: los descubiertos por actividad (por defecto) o la "
+        "leaderboard de FOMO (sesgada: se capturó sabiendo quién ganó)",
+    )
     c.add_argument("--fetch", action="store_true", help="consultar a Helius lo que falte")
     c.add_argument("--max-lookups", type=int, default=2000, help="tope de consultas (10 créditos)")
     c.add_argument(
@@ -73,17 +89,25 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         start = parse_as_of(args.start) if args.start else select_as_of
         if start is None:
             raise SystemExit("Indica --select-as-of (selección fuera de muestra) o --from.")
+        if until.timestamp() > datetime.now(UTC).timestamp() - SETTLE_S:
+            raise SystemExit("--until debe ser al menos 10 minutos anterior a ahora.")
+        if select_as_of is not None and start < select_as_of:
+            raise SystemExit("El periodo copiado no puede empezar antes de la selección.")
         if args.wallet:
             selected = [validate_address(w) for w in args.wallet]
+            select_as_of = None  # elegidos a mano: no es una selección fuera de muestra
             selection = await select_traders(ctx.repo, selected, start, args.select_window)
         else:
             if select_as_of is None:
                 raise SystemExit(
                     "Sin --wallet hace falta --select-as-of para elegir a los traders."
                 )
-            imported = [w.wallet for w in await ctx.repo.imported_wallets()]
-            print(f"Analizando {len(imported)} traders a fecha {select_as_of:%Y-%m-%d}…")
-            selection = await select_traders(ctx.repo, imported, select_as_of, args.select_window)
+            candidates = await universe(sessions, args.universe)
+            print(
+                f"Analizando {len(candidates)} traders (universo: {args.universe}) a fecha "
+                f"{select_as_of:%Y-%m-%d}…"
+            )
+            selection = await select_traders(ctx.repo, candidates, select_as_of, args.select_window)
             selected = [s.wallet for s in selection if s.eligible and (s.score or 0) > 0]
             selected = selected[: args.top]
         if not selected:
@@ -93,21 +117,25 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         t0, t1 = int(start.timestamp()), int(until.timestamp())
         in_period = [e for e in events if t0 <= e.at < t1 and e.kind in ("buy", "sell")]
         buys = sum(1 for e in in_period if e.kind == "buy")
-        expected = int(len(in_period) * 1.5) + (t1 - t0) // 3600
+        hours = (t1 - t0) // HOUR
+        refs_hours = 0 if args.no_references else (hours + 24) * (len(ASSETS) - 1)
+        expected = int(len(in_period) * 1.5) + hours + refs_hours
         print(
             f"{len(selected)} traders; {buys} compras y {len(in_period) - buys} ventas que "
             f"copiar ({start:%Y-%m-%d %H:%M} → {until:%Y-%m-%d %H:%M} UTC). Consultas "
             f"previstas si no hay nada en caché: unas {expected} (≈{expected * 10:,} créditos), "
-            f"precio horario de SOL incluido."
+            f"precios horarios de SOL y de las referencias incluidos."
         )
         prices = DelayedPrices(sessions, ctx.rpc, frozenset({settings.fomo_relayer}))
         quotes = DelayedQuotes(prices, fetch=args.fetch, max_lookups=args.max_lookups)
-        fees = await transfer_fees(sessions, {e.mint for e in in_period})
-        aggressive = RiskLimits()
+        fees = await transfer_fees(sessions, {e.mint for e in in_period}, start)
+        aggressive = AGGRESSIVE
         base = CopyParams(size_usd=aggressive.max_position_usd, impact_pct=args.impact)
         scenarios = []
+        big = f"{aggressive.max_position_usd:.0f} $"
+        small = f"{CONSERVATIVE.max_position_usd:.0f} $"
         plans = [
-            ("agresivo (25 $), costes medidos", base, aggressive),
+            (f"agresivo ({big}), costes medidos", base, aggressive),
             (
                 "agresivo, costes a la mitad",
                 _with(base, cost_multiplier=Decimal("0.5")),
@@ -115,20 +143,25 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
             ),
             ("agresivo, costes al doble", _with(base, cost_multiplier=Decimal(2)), aggressive),
             (
-                "conservador (10 $), costes medidos",
+                f"conservador ({small}), costes medidos",
                 _with(base, size_usd=CONSERVATIVE.max_position_usd),
                 CONSERVATIVE,
             ),
         ]
         for name, params, limits in plans:
             bt = CopyBacktest(quotes, params, limits, transfer_fee_bps=fees)
-            scenarios.append(Scenario(name, await bt.run(events, t0, t1)))
+            scenarios.append(Scenario(name, await bt.run(events, t0, t1), limits))
         refs: list[tuple[RefResult, RefResult]] = []
         coverage: list[Coverage] = []
         ref_lookups = 0
         if not args.no_references:
             for asset in ASSETS.values():
-                pool = prices.sol if asset is SOL else PoolPrices(sessions, ctx.rpc, asset)
+                left = max(0, args.max_lookups - quotes.lookups - ref_lookups)
+                pool = (
+                    prices.sol
+                    if asset is SOL
+                    else PoolPrices(sessions, ctx.rpc, asset, max_lookups=left)
+                )
                 refs_asset, cov = await _references(pool, t0, t1, fetch=args.fetch)
                 refs += refs_asset
                 coverage.append(cov)
@@ -140,6 +173,7 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
             selected=selected,
             select_as_of=select_as_of,
             select_window=args.select_window if select_as_of else None,
+            universe=None if args.wallet else args.universe,
             lookups=quotes.lookups + ref_lookups,
             missing=quotes.missing,
             seed=args.seed,
@@ -151,10 +185,14 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
             await asyncio.to_thread(Path(args.out).write_text, text, encoding="utf-8")
             print(f"Informe guardado en {args.out}")
         print(text)
-        if not args.fetch and quotes.missing:
+        if quotes.missing:
             print(
-                f"Faltan {quotes.missing} precios en caché: repite con --fetch para "
-                "consultarlos (gasta créditos de Helius)."
+                f"Faltan {quotes.missing} precios en caché"
+                + (
+                    f": se alcanzó el tope de {args.max_lookups} consultas."
+                    if args.fetch
+                    else ": repite con --fetch para consultarlos (gasta créditos de Helius)."
+                )
             )
     return 0
 
@@ -165,11 +203,12 @@ async def _references(
     """Referencias de un activo con costes medidos y al doble (mismo orden)."""
     base = RefParams()
     series = await pool.hourly(t0 - base.trend_hours * HOUR, t1, fetch=fetch)
-    hours = len(range(t0 - t0 % HOUR, t1 + 1, HOUR))
-    have = sum(1 for t, _ in series if t >= t0)
+    first = -(-t0 // HOUR) * HOUR  # primera hora en punto del periodo
+    hours = len(range(first, t1 + 1, HOUR))
+    have = sum(1 for t, _ in series if t >= first)
     cov = Coverage(pool.asset.name, have, hours)
-    if not have:
-        return [], cov
+    if have < MIN_COVERAGE * hours:
+        return [], cov  # con tantos huecos, la comparación no sería justa
     doubled = RefParams(cost_multiplier=Decimal(2))
     pairs = zip(
         references(pool.asset.name, series, t0, t1, base),

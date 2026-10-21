@@ -17,6 +17,7 @@ from copybot.backtest.stats import max_drawdown_pct
 
 ZERO = Decimal(0)
 ONE = Decimal(1)
+HOUR = 3600
 Series = Sequence[tuple[int, Decimal]]  # (hora, precio en USD), en orden
 
 
@@ -27,6 +28,7 @@ class RefParams:
     tx_fee_usd: Decimal = Decimal("0.02")  # ~0,000105 SOL de comisión de red con prioridad
     dca_every_s: int = 7 * 86400
     trend_hours: int = 24  # media móvil de las últimas 24 horas
+    trend_min_samples: int = 20  # horas con precio necesarias para calcular la media
     cost_multiplier: Decimal = ONE
 
     @property
@@ -82,12 +84,13 @@ def buy_and_hold(asset: str, series: Series, start: int, end: int, p: RefParams)
 
 
 def dca(asset: str, series: Series, start: int, end: int, p: RefParams) -> RefResult:
-    """El capital se reparte en compras iguales cada ``dca_every_s`` (la primera al
-    empezar); lo que aún no se ha invertido espera en USDC sin rendimiento."""
+    """El capital se reparte en compras iguales cada ``dca_every_s`` dentro de
+    ``[start, end)`` (la primera al empezar); lo que aún no se ha invertido espera en USDC
+    sin rendimiento."""
     period = _in_period(series, start, end)
     if not period:
         raise ValueError(f"sin precios de {asset} en el periodo")
-    schedule = list(range(start, end + 1, p.dca_every_s))
+    schedule = list(range(start, end, p.dca_every_s))
     amount = p.capital_usd / len(schedule)
     cash, units, done = p.capital_usd, ZERO, 0
     curve = []
@@ -103,9 +106,10 @@ def dca(asset: str, series: Series, start: int, end: int, p: RefParams) -> RefRe
 
 def trend(asset: str, series: Series, start: int, end: int, p: RefParams) -> RefResult:
     """Dentro mientras el precio está por encima de su media de ``trend_hours`` horas y
-    fuera (en USDC) cuando cae por debajo. La decisión se toma con el precio de una hora
-    y se ejecuta al de la siguiente: nunca con información del futuro. ``series`` debe
-    traer también las horas previas a ``start`` para calcular la primera media."""
+    fuera (en USDC) cuando cae por debajo. La media es la de los precios de las últimas
+    ``trend_hours`` horas (al menos ``trend_min_samples``). La decisión se toma con el
+    precio de una hora y se ejecuta al siguiente precio: nunca con información del futuro.
+    ``series`` debe traer también las horas previas a ``start`` para la primera media."""
     cash, units, trades = p.capital_usd, ZERO, 0
     pending: str | None = None
     curve = []
@@ -120,8 +124,9 @@ def trend(asset: str, series: Series, start: int, end: int, p: RefParams) -> Ref
         elif pending == "vender":
             cash, units, trades = _sell(units, price, p), ZERO, trades + 1
         pending = None
-        window = [q for _, q in series[max(0, i - p.trend_hours + 1) : i + 1]]
-        if len(window) == p.trend_hours:
+        since = t - p.trend_hours * HOUR
+        window = [q for t2, q in series[max(0, i - p.trend_hours + 1) : i + 1] if t2 > since]
+        if len(window) >= p.trend_min_samples:
             above = price > sum(window, ZERO) / len(window)
             if above and not units:
                 pending = "comprar"

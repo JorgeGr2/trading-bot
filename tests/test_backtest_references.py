@@ -9,7 +9,7 @@ from copybot.backtest.references import RefParams, buy_and_hold, dca, trend
 D = Decimal
 H = 3600
 T = 1_791_000_000
-FREE = RefParams(cost_pct=D(0), tx_fee_usd=D(0), trend_hours=3)
+FREE = RefParams(cost_pct=D(0), tx_fee_usd=D(0), trend_hours=3, trend_min_samples=3)
 
 
 def series(*prices: str, start: int = T) -> list[tuple[int, D]]:
@@ -27,10 +27,17 @@ def test_buy_and_hold_with_costs():
 
 def test_dca_buys_equal_amounts_weekly():
     week = 7 * 86400
-    s = [(T, D(100)), (T + week, D(50)), (T + 2 * week - H, D(100))]
-    result = dca("X", s, T, T + 2 * week - H, FREE)
-    # dos compras de 50 $: 0,5 + 1 unidades que acaban valiendo 150 $
+    s = [(T, D(100)), (T + week, D(50)), (T + 2 * week, D(100))]
+    result = dca("X", s, T, T + 2 * week, FREE)
+    # dos compras de 50 $ (la del final del periodo no se hace): 0,5 + 1 unidades → 150 $
     assert result.final_usd == 150 and result.trades == 3
+
+
+def test_trend_average_needs_enough_hours():
+    # Faltan horas antes de empezar: no hay media y no opera.
+    s = [(T - 10 * H, D(10)), (T, D(12)), (T + H, D(15))]
+    result = trend("X", s, T, T + H, FREE)
+    assert result.trades == 0 and result.final_usd == 100
 
 
 def test_trend_decides_on_one_hour_and_trades_on_the_next():
@@ -58,4 +65,4 @@ def test_report_ranks_the_references_and_flags_missing_prices():
     lines = _references_section([], [(down, down), (up, up)], RefParams(), [Coverage("ETH", 0, 10)])
     rows = [line for line in lines if line.startswith("| comprar")]
     assert "BTC" in rows[0] and "SPYx" in rows[1]  # de más a menos
-    assert any("ETH: precio en 0 de 10 horas (sin datos" in line for line in lines)
+    assert any("ETH: precio en 0 de 10 horas (demasiados huecos" in line for line in lines)

@@ -2,8 +2,8 @@
 
 Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
 
-> **Estado:** Fase 4 (motor de simulación, filtros de seguridad y gestión de riesgo),
-> pendiente de aprobación; resultados en el informe de la Fase 4.
+> **Estado:** Fase 5 (backtester: qué habría pasado copiando, frente a otras
+> inversiones), pendiente de aprobación; resultados en el informe de la Fase 5.
 > El proyecto solo simula: no maneja claves privadas, no firma transacciones y no envía
 > órdenes. Un test impide añadir ese tipo de código. El modo con dinero real solo se
 > planteará si la simulación cumple los criterios fijados de antemano (apartado 12 del
@@ -19,6 +19,8 @@ Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
   reales): [`docs/informes/fase-3.md`](docs/informes/fase-3.md)
 - Informe de la Fase 4 (simulación de copy-trading con dos libros, riesgo y prueba en
   vivo): [`docs/informes/fase-4.md`](docs/informes/fase-4.md)
+- Informe de la Fase 5 (backtest fuera de muestra del copy-trading frente a SOL, BTC,
+  ETH y el S&P 500 tokenizado): [`docs/informes/fase-5.md`](docs/informes/fase-5.md)
 
 ## Qué hace ahora mismo
 
@@ -44,6 +46,13 @@ Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
   límites y un libro que copia cada señal con 10 $ para medir su calidad. Copia las
   ventas del trader en la misma proporción y tiene stop-loss, venta a las 48 h, parada
   automática por pérdidas y modo de solo lectura si el monitor deja de dar datos.
+
+- **Backtest del copy-trading** (resultados estimados, aparte de la simulación en vivo).
+  Cada semana elige a los traders con ventaja usando solo datos anteriores y copia sus
+  operaciones de la semana siguiente al precio real que había 4-8 s después (de las
+  operaciones de otros usuarios, vía Helius), con todos los costes. Lo compara con
+  comprar y mantener, comprar cada semana o seguir la tendencia de SOL, BTC, ETH y el
+  S&P 500 tokenizado (SPYx), con el mismo dinero. Mismo informe con los mismos datos.
 
 Todavía no tiene interfaz gráfica ni bot de Telegram. Eso llega en las fases siguientes.
 
@@ -87,6 +96,12 @@ uv run copybot sim run --minutes 90    # o solo un rato
 uv run copybot sim status              # estado y resumen
 uv run copybot sim report              # informe completo y comparaciones
 uv run copybot sim pause | resume | stop
+
+# Backtest: selección semanal desde el 5-oct entre los traders descubiertos por actividad
+uv run copybot backtest copy --select-as-of 2026-10-05 --until 2026-10-19T18:00 \
+    --fetch --max-lookups 4000 --out informe.md
+# Sin --fetch usa solo lo guardado en caché (no gasta créditos).
+# --universe leaderboard: cota optimista (la leaderboard se capturó sabiendo quién ganó).
 ```
 
 Los parámetros del motor se cambian con variables `COPYBOT_SIM_*` (latencia, slippage,

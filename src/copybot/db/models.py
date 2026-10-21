@@ -628,6 +628,16 @@ class MarketSymbol(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Hasta dónde están descargadas sus velas diarias (apertura de la última cerrada).
     bars_synced_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Última descarga tras dejar de cotizar: a partir de aquí ya no se pide nada.
+    final_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Desde qué día se ha pedido su historia (para rellenar hacia atrás si se amplía).
+    history_requested_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    listing_source: Mapped[str] = mapped_column(String(10), server_default="api")
+    tick_size: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    step_size: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    min_notional: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    filters_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MarketBar(Base):
@@ -651,3 +661,250 @@ class MarketBar(Base):
         CheckConstraint("low <= high AND low >= 0", name="market_bar_prices_valid"),
         Index("ix_market_bars_interval_time", "exchange", "interval", "open_time"),
     )
+
+
+# --- Cripto (Binance): análisis, backtest y cartera de prueba ------------------------------
+
+
+class CryptoCostSnapshot(Base):
+    """Foto de la mejor oferta de cada par (calibración de costes)."""
+
+    __tablename__ = "crypto_cost_snapshots"
+
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(40), primary_key=True)
+    bid: Mapped[Decimal] = mapped_column(AMOUNT)
+    ask: Mapped[Decimal] = mapped_column(AMOUNT)
+    bid_qty: Mapped[Decimal] = mapped_column(AMOUNT)
+    ask_qty: Mapped[Decimal] = mapped_column(AMOUNT)
+    quote_volume_24h: Mapped[Decimal | None] = mapped_column(AMOUNT)
+
+
+class CryptoBacktestRun(Base):
+    """Registro obligatorio de cada backtest (para contar las configuraciones probadas)."""
+
+    __tablename__ = "crypto_backtest_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    strategy_version: Mapped[str] = mapped_column(String(40))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    role: Mapped[str] = mapped_column(String(20))  # principal, variante, estres, adhoc
+    counts_for_k: Mapped[bool] = mapped_column(Boolean)
+    period_from: Mapped[date] = mapped_column(Date)
+    period_to: Mapped[date] = mapped_column(Date)
+    data_hash: Mapped[str] = mapped_column(String(64))
+    cost_table_hash: Mapped[str] = mapped_column(String(64))
+    code_commit: Mapped[str | None] = mapped_column(String(40))
+    seed: Mapped[int] = mapped_column(Integer)
+    n_days: Mapped[int] = mapped_column(Integer)
+    sr_daily: Mapped[float | None] = mapped_column(Numeric(20, 10))
+    skew: Mapped[float | None] = mapped_column(Numeric(20, 10))
+    kurt: Mapped[float | None] = mapped_column(Numeric(20, 10))
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    report_md: Mapped[str | None] = mapped_column(String)
+
+    __table_args__ = (Index("ix_crypto_backtest_runs_config", "strategy_version", "config_hash"),)
+
+
+class CryptoAnalysis(Base):
+    """Análisis de un día (ranking y régimen). Si se calculó en vivo, no se reescribe."""
+
+    __tablename__ = "crypto_analyses"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    day: Mapped[date] = mapped_column(Date)
+    strategy_version: Mapped[str] = mapped_column(String(40))
+    params_hash: Mapped[str] = mapped_column(String(64))
+    data_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    computed_live: Mapped[bool] = mapped_column(Boolean)
+    regime: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    universe_size: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20))  # ok, datos_incompletos
+    confidence: Mapped[str | None] = mapped_column(String(20))
+    code_commit: Mapped[str | None] = mapped_column(String(40))
+    report_md: Mapped[str | None] = mapped_column(String)
+    report_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("day", "strategy_version", name="uq_crypto_analysis_day"),)
+
+
+class CryptoAnalysisRow(Base):
+    """Una moneda en el análisis de un día: dentro o fuera del universo, puesto y señales."""
+
+    __tablename__ = "crypto_analysis_rows"
+
+    analysis_id: Mapped[int] = mapped_column(
+        ForeignKey("crypto_analyses.id", ondelete="CASCADE"), primary_key=True
+    )
+    symbol: Mapped[str] = mapped_column(String(40), primary_key=True)
+    included: Mapped[bool] = mapped_column(Boolean)
+    exclusion_reason: Mapped[str | None] = mapped_column(String(200))
+    liquidity_rank: Mapped[int | None] = mapped_column(Integer)
+    median_qv_30d: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    components: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    ret_7d: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    ret_30d: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    ret_90d: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    vol_daily: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    best_day_share: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    p5_week: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    risk_level: Mapped[str | None] = mapped_column(String(10))
+    entry_eligible: Mapped[bool | None] = mapped_column(Boolean)
+    live_block_reason: Mapped[str | None] = mapped_column(String(200))
+    spread_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    warnings: Mapped[list[str] | None] = mapped_column(JSONB)
+
+
+class CryptoPaperRun(Base):
+    """Una cartera de prueba: la continua (nunca se reinicia) o una prueba con plazo."""
+
+    __tablename__ = "crypto_paper_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(10))  # continua, prueba
+    requested_days: Mapped[int | None] = mapped_column(Integer)
+    start_day: Mapped[date] = mapped_column(Date)
+    end_day: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20))
+    status_reason: Mapped[str | None] = mapped_column(String(300))
+    strategy_version: Mapped[str] = mapped_column(String(40))
+    params_hash: Mapped[str] = mapped_column(String(64))
+    limits: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    initial_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    created_by: Mapped[str] = mapped_column(String(10))  # cli, gui
+    verdict: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "uq_crypto_paper_runs_active",
+            "kind",
+            unique=True,
+            postgresql_where=text("status IN ('RUNNING', 'PAUSED', 'HALTED_DAY', 'HALTED_RISK')"),
+        ),
+    )
+
+
+class CryptoPaperBook(Base):
+    __tablename__ = "crypto_paper_books"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("crypto_paper_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    book: Mapped[str] = mapped_column(String(10), primary_key=True)  # portfolio, signals
+    initial_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    cash_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)  # nulo en el libro de señales
+    peak_equity_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    prev_equity_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    last_day: Mapped[date | None] = mapped_column(Date)
+
+    __table_args__ = (
+        CheckConstraint("cash_usd IS NULL OR cash_usd >= 0", name="crypto_book_cash_non_negative"),
+    )
+
+
+class CryptoPaperOrder(Base):
+    __tablename__ = "crypto_paper_orders"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("crypto_paper_runs.id", ondelete="CASCADE"))
+    book: Mapped[str] = mapped_column(String(10))
+    day: Mapped[date] = mapped_column(Date)
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True)
+    symbol: Mapped[str] = mapped_column(String(40))
+    side: Mapped[str] = mapped_column(String(4))  # buy, sell
+    purpose: Mapped[str] = mapped_column(String(20))
+    requested_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    status: Mapped[str] = mapped_column(String(10))  # pending, filled, rejected, failed
+    reason: Mapped[str | None] = mapped_column(String(300))
+    decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    qty: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    fee_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    bid: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    ask: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    ask_qty: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    ref_open_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    exec_gap_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CryptoPaperPosition(Base):
+    __tablename__ = "crypto_paper_positions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("crypto_paper_runs.id", ondelete="CASCADE"))
+    book: Mapped[str] = mapped_column(String(10))
+    symbol: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(10))  # open, closed
+    qty: Mapped[Decimal] = mapped_column(AMOUNT)
+    entry_price: Mapped[Decimal] = mapped_column(AMOUNT)
+    cost_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    opened_day: Mapped[date] = mapped_column(Date)
+    closed_day: Mapped[date | None] = mapped_column(Date)
+    proceeds_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    realized_pnl_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    exit_purpose: Mapped[str | None] = mapped_column(String(20))
+    btc_entry_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    btc_exit_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    last_value_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    unsellable: Mapped[bool] = mapped_column(Boolean, server_default="false")
+
+    __table_args__ = (
+        Index(
+            "uq_crypto_paper_positions_open",
+            "run_id",
+            "book",
+            "symbol",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
+
+
+class CryptoPaperDay(Base):
+    __tablename__ = "crypto_paper_days"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("crypto_paper_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    status: Mapped[str] = mapped_column(String(10))  # ok, perdido, sin_datos
+    analysis_id: Mapped[int | None] = mapped_column(ForeignKey("crypto_analyses.id"))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fidelity_ok: Mapped[bool | None] = mapped_column(Boolean)
+    notes: Mapped[str | None] = mapped_column(String)
+
+
+class CryptoPaperSnapshot(Base):
+    __tablename__ = "crypto_paper_snapshots"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("crypto_paper_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    book: Mapped[str] = mapped_column(String(10), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    equity_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    worst_equity_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    bid_equity_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    cash_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    positions_value_usd: Mapped[Decimal] = mapped_column(AMOUNT)
+    open_positions: Mapped[int] = mapped_column(Integer)
+    btc_benchmark_usd: Mapped[Decimal | None] = mapped_column(AMOUNT)
+
+
+class CryptoPaperEvent(Base):
+    __tablename__ = "crypto_paper_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("crypto_paper_runs.id", ondelete="CASCADE"))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    kind: Mapped[str] = mapped_column(String(20))
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)

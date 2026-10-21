@@ -15,7 +15,7 @@ from decimal import Decimal
 import httpx
 import structlog
 
-from copybot.solana.rpc import RateLimiter
+from copybot.ratelimit import RateLimiter
 
 log = structlog.get_logger(__name__)
 

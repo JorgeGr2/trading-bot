@@ -46,6 +46,8 @@ FORBIDDEN_PATTERNS = [
     r"X-MBX-APIKEY",
     r"\bhmac\b",
     r"api_?secret",
+    r"listenKey",
+    r"userDataStream",
 ]
 
 # Bibliotecas que permiten firmar transacciones de Solana u operar en exchanges.
@@ -115,6 +117,8 @@ def test_guard_allows_read_only_quotes_and_prices():
         "https://api.binance.com/api/v3/exchangeInfo",
         "https://api.binance.com/api/v3/ticker/24hr",
         "https://api.binance.com/api/v3/ticker/bookTicker",
+        "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1d/BTCUSDT-1d-2021-05.zip",
+        "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision?delimiter=/&prefix=data/spot/",
     ):
         assert not _flagged(url), url
 
@@ -130,5 +134,7 @@ def test_guard_blocks_binance_trading_and_signed_requests():
         'headers={"X-MBX-APIKEY": key}',
         "hmac.new(secret, query, sha256)",
         "BINANCE_API_SECRET",
+        "https://api.binance.com/api/v3/userDataStream",
+        'params={"listenKey": key}',
     ):
         assert _flagged(text), text

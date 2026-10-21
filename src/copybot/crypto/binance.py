@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 import structlog
 
-from copybot.solana.rpc import RateLimiter
+from copybot.ratelimit import RateLimiter
 
 log = structlog.get_logger(__name__)
 
@@ -42,7 +42,12 @@ INTERVAL_MS = {
 
 
 class BinanceError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code  # código de error de Binance (p. ej. −1121: par inexistente)
+
+
+INVALID_SYMBOL = -1121
 
 
 class BinanceBannedError(BinanceError):
@@ -56,6 +61,9 @@ class SymbolInfo:
     quote: str
     status: str  # TRADING, BREAK, END…
     spot: bool  # se puede negociar al contado
+    tick_size: Decimal | None = None
+    step_size: Decimal | None = None  # el de MARKET_LOT_SIZE si es > 0; si no, LOT_SIZE
+    min_notional: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +93,8 @@ class BookTicker:
     symbol: str
     bid: Decimal
     ask: Decimal
+    bid_qty: Decimal = Decimal(0)
+    ask_qty: Decimal = Decimal(0)
 
     @property
     def spread_pct(self) -> Decimal | None:
@@ -99,6 +109,26 @@ def _ms(dt: datetime) -> int:
 
 def _dt(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, UTC)
+
+
+def parse_filters(
+    filters: list[dict[str, Any]],
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """(tickSize, stepSize, minNotional) de los filtros de un par. El paso de cantidad de
+    las órdenes a mercado es el de MARKET_LOT_SIZE si es > 0; si no, el de LOT_SIZE."""
+    by_type = {f.get("filterType"): f for f in filters}
+    tick = by_type.get("PRICE_FILTER", {}).get("tickSize")
+    lot = by_type.get("LOT_SIZE", {}).get("stepSize")
+    market = by_type.get("MARKET_LOT_SIZE", {}).get("stepSize")
+    notional = by_type.get("NOTIONAL", {}).get("minNotional") or by_type.get(
+        "MIN_NOTIONAL", {}
+    ).get("minNotional")
+
+    def dec(value: Any) -> Decimal | None:
+        return None if value in (None, "") else Decimal(str(value))
+
+    step = dec(market) if dec(market) else dec(lot)
+    return dec(tick), step, dec(notional)
 
 
 def parse_kline(row: list[Any]) -> Kline:
@@ -193,7 +223,11 @@ class BinanceMarket:
                     last = f"{base}: {response.status_code} sin JSON ({response.text[:80]!r})"
                     continue
                 if response.status_code != 200:
-                    raise BinanceError(f"Binance respondió {response.status_code}: {data}")
+                    code = data.get("code") if isinstance(data, dict) else None
+                    raise BinanceError(
+                        f"Binance respondió {response.status_code}: {data}",
+                        code=code if isinstance(code, int) else None,
+                    )
                 return data
             await self._sleep(2.0 * (attempt + 1))
         raise BinanceError(f"Binance sin respuesta tras {self._attempts} intentos ({last})")
@@ -205,14 +239,17 @@ class BinanceMarket:
         data = await self._get("/api/v3/exchangeInfo", {"showPermissionSets": "false"})
         out = []
         for s in data.get("symbols") or []:
-            spot = bool(s.get("isSpotTradingAllowed"))
+            tick, step, notional = parse_filters(s.get("filters") or [])
             out.append(
                 SymbolInfo(
                     symbol=s["symbol"],
                     base=s["baseAsset"],
                     quote=s["quoteAsset"],
                     status=s.get("status", "?"),
-                    spot=spot,
+                    spot=bool(s.get("isSpotTradingAllowed")),
+                    tick_size=tick,
+                    step_size=step,
+                    min_notional=notional,
                 )
             )
         return out
@@ -278,6 +315,12 @@ class BinanceMarket:
     async def book_tickers(self) -> list[BookTicker]:
         data = await self._get("/api/v3/ticker/bookTicker")
         return [
-            BookTicker(symbol=t["symbol"], bid=Decimal(t["bidPrice"]), ask=Decimal(t["askPrice"]))
+            BookTicker(
+                symbol=t["symbol"],
+                bid=Decimal(t["bidPrice"]),
+                ask=Decimal(t["askPrice"]),
+                bid_qty=Decimal(t.get("bidQty") or 0),
+                ask_qty=Decimal(t.get("askQty") or 0),
+            )
             for t in data
         ]

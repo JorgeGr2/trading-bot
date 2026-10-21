@@ -175,6 +175,10 @@ class BinanceMarket:
                     raise BinanceBannedError(
                         f"Binance ha vetado la IP temporalmente (418): {response.text[:120]}"
                     )
+                if response.status_code == 451:
+                    # Binance no sirve a la región de esta IP: se prueba la otra dirección.
+                    last = f"{base}: 451 (no disponible desde esta ubicación)"
+                    continue
                 if response.status_code == 429:
                     retry = response.headers.get("Retry-After")
                     await self._sleep(float(retry) if retry else 30.0)

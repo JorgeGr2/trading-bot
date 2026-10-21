@@ -607,3 +607,47 @@ class PriceBar(Base):
     volume: Mapped[Decimal | None] = mapped_column(AMOUNT)
 
     __table_args__ = (CheckConstraint("low <= high AND low > 0", name="bar_prices_valid"),)
+
+
+# --- Cripto (Binance): datos de mercado ------------------------------------------------
+
+
+class MarketSymbol(Base):
+    """Par de un exchange. Se guardan también los retirados (estado BREAK/END) para que
+    el backtest vea el mercado de cada día tal como era, no solo los supervivientes."""
+
+    __tablename__ = "market_symbols"
+
+    exchange: Mapped[str] = mapped_column(String(20), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(40), primary_key=True)
+    base: Mapped[str] = mapped_column(String(30))
+    quote: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20))
+    spot: Mapped[bool] = mapped_column(Boolean)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Hasta dónde están descargadas sus velas diarias (apertura de la última cerrada).
+    bars_synced_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MarketBar(Base):
+    """Vela cerrada de un par (apertura ``open_time``, en UTC)."""
+
+    __tablename__ = "market_bars"
+
+    exchange: Mapped[str] = mapped_column(String(20), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(40), primary_key=True)
+    interval: Mapped[str] = mapped_column(String(5), primary_key=True)
+    open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    open: Mapped[Decimal] = mapped_column(AMOUNT)
+    high: Mapped[Decimal] = mapped_column(AMOUNT)
+    low: Mapped[Decimal] = mapped_column(AMOUNT)
+    close: Mapped[Decimal] = mapped_column(AMOUNT)
+    volume: Mapped[Decimal] = mapped_column(AMOUNT)
+    quote_volume: Mapped[Decimal] = mapped_column(AMOUNT)
+    trades: Mapped[int] = mapped_column(Integer)
+
+    __table_args__ = (
+        CheckConstraint("low <= high AND low >= 0", name="market_bar_prices_valid"),
+        Index("ix_market_bars_interval_time", "exchange", "interval", "open_time"),
+    )

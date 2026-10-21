@@ -84,6 +84,9 @@ def render(
     out = [
         "# Backtest del copy-trading",
         "",
+        "Resultados **estimados** con precios históricos de operaciones de otros usuarios; "
+        "no se mezclan con la simulación en vivo.",
+        "",
         f"- Periodo copiado: {_date(main.start)} → {_date(main.end)} UTC",
     ]
     if select_as_of is not None:

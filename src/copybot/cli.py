@@ -16,8 +16,8 @@ import sys
 
 import structlog
 
+from copybot import backtest_cli, sim_cli, traders_cli
 from copybot import logging as copylog
-from copybot import sim_cli, traders_cli
 from copybot.config import Settings
 from copybot.db.repo import Repository
 from copybot.db.session import make_engine, make_sessionmaker
@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("monitor", help="seguir las wallets en vivo")
     traders_cli.add_parsers(sub)
     sim_cli.add_parsers(sub)
+    backtest_cli.add_parsers(sub)
     args = parser.parse_args(argv)
 
     unknown = unknown_settings()
@@ -81,6 +82,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "monitor":
         copylog.configure()
         return asyncio.run(_monitor(settings))
+    if args.command == "backtest":
+        copylog.configure("WARNING")
+        return asyncio.run(backtest_cli.run(args, settings))
     if args.command == "sim":
         copylog.configure("INFO" if args.action == "run" else "WARNING")
         return asyncio.run(sim_cli.run(args, settings))

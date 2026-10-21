@@ -1,0 +1,147 @@
+"""Precio retrasado: extracción de precios, precio de SOL de los pools y caché."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+
+from copybot.backtest.delayed import DelayedPrices, SwapPrice, swap_prices, usd_price
+from copybot.backtest.solusd import SOL_USDC_POOLS, SolUsd, pool_swaps
+from copybot.db.session import make_sessionmaker
+from copybot.solana.constants import TOKEN_PROGRAM, USDC_MINT, WSOL_MINT
+from tests.fakes import MEME, RELAYER, FakeHistoryRpc, fomo_like_swap
+
+D = Decimal
+T = 1_791_000_000  # en punto
+OTHER = "Other11111111111111111111111111111111111111"
+TEMP = "TempWsolAccount1111111111111111111111111111"
+POOL = SOL_USDC_POOLS[0]
+
+
+def swap(sig: str, at: int, tokens: int, usdc: int) -> dict:
+    return fomo_like_swap(
+        sig, at, OTHER, token_raw_delta=tokens, usdc_raw_delta=usdc, block_time=at
+    )
+
+
+def own_swap(sig: str, at: int, tokens: int, lamports: int) -> dict:
+    """Swap normal pagado en SOL: el usuario paga la comisión y firma también una cuenta
+    temporal de wSOL recién creada (el caso que el modo descubrimiento no veía)."""
+    tx = fomo_like_swap(sig, at, OTHER, token_raw_delta=tokens, usdc_raw_delta=0, block_time=at)
+    keys = tx["transaction"]["message"]["accountKeys"]
+    keys[0]["pubkey"] = OTHER
+    keys[1]["pubkey"] = TEMP
+    meta = tx["meta"]
+    meta["preBalances"][0] = 10**10
+    meta["postBalances"][0] = 10**10 - meta["fee"] + lamports
+    return tx
+
+
+def pool_tx(at: int, sol_lamports: int, usdc_raw: int) -> dict:
+    """Cambios de saldo de las cuentas del pool SOL-USDC (lo único que se lee)."""
+
+    def bal(idx: int, mint: str, amount: int, decimals: int) -> dict:
+        return {
+            "accountIndex": idx,
+            "mint": mint,
+            "owner": POOL,
+            "programId": TOKEN_PROGRAM,
+            "uiTokenAmount": {"amount": str(amount), "decimals": decimals},
+        }
+
+    return {
+        "slot": at,
+        "blockTime": at,
+        "transaction": {"signatures": [f"pool{at}{sol_lamports}"], "message": {}},
+        "meta": {
+            "err": None,
+            "preTokenBalances": [bal(1, WSOL_MINT, 10**15, 9), bal(2, USDC_MINT, 10**13, 6)],
+            "postTokenBalances": [
+                bal(1, WSOL_MINT, 10**15 + sol_lamports, 9),
+                bal(2, USDC_MINT, 10**13 + usdc_raw, 6),
+            ],
+        },
+    }
+
+
+def test_prices_from_other_users_swaps():
+    txs = [
+        swap("a" * 10, T + 5, 1_000_000, -12_000),  # compra 1 token por 0,012 $
+        swap("b" * 10, T + 6, -2_000_000, 26_000),  # vende 2 por 0,026 $
+        own_swap("c" * 10, T + 7, 1_000_000, -100_000),  # compra 1 por 0,0001 SOL
+    ]
+    prices = swap_prices(txs, MEME, T, frozenset({RELAYER}))
+    assert [(p.offset_s, p.quote, p.price) for p in prices] == [
+        (5, "USDC", D("0.012")),
+        (6, "USDC", D("0.013")),
+        (7, "SOL", D("0.0001")),
+    ]
+
+
+def test_sol_swaps_need_a_sol_price():
+    prices = [SwapPrice(4, "SOL", D("0.0001")), SwapPrice(5, "USDC", D("0.0101"))]
+    assert usd_price(prices, D(100)) == (D("0.01005"), 2)
+    assert usd_price(prices, None) == (D("0.0101"), 1)  # sin precio de SOL: se descarta
+    assert usd_price([SwapPrice(4, "SOL", D("0.0001"))], None) == (None, 0)
+
+
+def test_pool_swaps_read_the_pool_accounts():
+    txs = [
+        pool_tx(T + 1, -2 * 10**9, 240 * 10**6),  # el pool entrega 2 SOL y recibe 240 USDC
+        pool_tx(T + 2, 10**9, -119 * 10**6),  # recibe 1 SOL y entrega 119 USDC
+        pool_tx(T + 3, 0, 0),  # un bot que pasa por el pool sin cambiar nada
+        pool_tx(T + 4, 10**6, -121_000),  # 0,001 SOL: demasiado pequeño
+    ]
+    assert [(s.at, s.price, s.sol) for s in pool_swaps(txs, POOL)] == [
+        (T + 1, D(120), D(2)),
+        (T + 2, D(119), D(1)),
+    ]
+
+
+@pytest.mark.postgres
+async def test_sol_price_is_interpolated_between_hourly_samples(engine):
+    rpc = FakeHistoryRpc(credits_per_call=10)
+    for i in range(3):
+        rpc.add(POOL, pool_tx(T + i, -(10**9), 120 * 10**6))
+        rpc.add(POOL, pool_tx(T + 3600 + i, -(10**9), 130 * 10**6))
+    sessions = make_sessionmaker(engine)
+    sol = SolUsd(sessions, rpc)
+    assert await sol.at(T + 900, fetch=True) == D("122.5")
+    assert len(rpc.calls) == 2 and sol.lookups == 2  # una muestra por hora, primer pool
+    cached = SolUsd(sessions, None)
+    assert await cached.at(T + 1800, fetch=False) == D(125)
+    assert await cached.at(T + 7200 * 5, fetch=False) is None
+
+
+@pytest.mark.postgres
+async def test_lookup_extends_the_window_and_is_cached(engine):
+    rpc = FakeHistoryRpc(credits_per_call=10)
+    for hour in (T, T + 3600):
+        for i in range(3):
+            rpc.add(POOL, pool_tx(hour + i, -(10**9), 200 * 10**6))  # SOL a 200 $
+    rpc.add(MEME, own_swap("c" * 10, T + 30, 1_000_000, -100_000))  # nadie en 4-8 s
+    prices = DelayedPrices(make_sessionmaker(engine), rpc, frozenset({RELAYER}))
+    row = await prices.get(MEME, T)
+    assert row.price_usd == D("0.02") and row.sol_usd == 200
+    assert row.window_end == 60 and row.swaps == 1
+    assert [c["address"] for c in rpc.calls] == [MEME, MEME, POOL, POOL]  # 4-8 s, 8-60 s
+    assert prices.lookups == 4
+    again = await prices.get(MEME, T)
+    assert again.price_usd == D("0.02") and len(rpc.calls) == 4  # de la caché
+    nobody = await prices.get(MEME, T + 1000)
+    assert nobody.price_usd is None and nobody.swaps == 0
+    offline = DelayedPrices(make_sessionmaker(engine), None, frozenset())
+    assert await offline.get(MEME, T + 99) is None and offline.missing == 1
+
+
+@pytest.mark.postgres
+async def test_busy_windows_are_paged(engine):
+    rpc = FakeHistoryRpc(credits_per_call=10)
+    for i in range(230):  # transacciones de bots sin cambios de saldo
+        rpc.add(MEME, swap(f"n{i:09d}", T + 5, 0, 0), tx_index=i)
+    rpc.add(MEME, swap("y" * 10, T + 6, 1_000_000, -10_000), tx_index=999)
+    sessions = make_sessionmaker(engine)
+    prices = DelayedPrices(sessions, rpc, frozenset({RELAYER}), sol=SolUsd(sessions, None))
+    row = await prices.get(MEME, T)
+    assert row.price_usd == D("0.01") and row.detail["paginas"] == 3

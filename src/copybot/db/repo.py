@@ -101,6 +101,10 @@ class Repository:
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessionmaker
 
+    @property
+    def sessions(self) -> async_sessionmaker[AsyncSession]:
+        return self._sessions
+
     # --- Wallets ----------------------------------------------------------------
 
     async def add_wallet(self, address: str, *, label: str | None = None, source: str) -> bool:

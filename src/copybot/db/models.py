@@ -606,6 +606,4 @@ class PriceBar(Base):
     close: Mapped[Decimal] = mapped_column(AMOUNT)
     volume: Mapped[Decimal | None] = mapped_column(AMOUNT)
 
-    __table_args__ = (
-        CheckConstraint("low <= high AND low > 0", name="bar_prices_valid"),
-    )
+    __table_args__ = (CheckConstraint("low <= high AND low > 0", name="bar_prices_valid"),)

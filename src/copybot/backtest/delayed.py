@@ -6,8 +6,14 @@ con el retraso medido en vivo: decidimos unos 4 s después del bloque del trader
 compra simulada termina a los 6 s. Por defecto se miran las operaciones entre 4 y 8 s
 después; si no hay ninguna, hasta 60 s.
 
-Cada consulta cuesta 10 créditos de Helius y se guarda en ``backtest_delayed_prices``:
-repetir el backtest no vuelve a gastar y da exactamente lo mismo.
+Cuenta cualquier firmante de la transacción, también el que paga la comisión (en un
+swap normal es el propio usuario; en FOMO es el relayer, que se descarta). Muchas
+transacciones son de bots que no llegan a cambiar ningún saldo: si una página no da
+bastantes operaciones se piden más, hasta ``MAX_PAGES``. Las operaciones pagadas en SOL
+se pasan a dólares con el precio de SOL de los pools SOL-USDC (``solusd``).
+
+Cada página cuesta 10 créditos de Helius y el resultado se guarda en
+``backtest_delayed_prices``: repetir el backtest no vuelve a gastar y da lo mismo.
 """
 
 from __future__ import annotations
@@ -20,12 +26,18 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 import structlog
-from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from copybot.backtest.solusd import SolUsd
 from copybot.db.models import DelayedPrice
-from copybot.solana.classifier import EventKind, MalformedTransactionError, classify
+from copybot.solana.classifier import (
+    Confidence,
+    EventKind,
+    MalformedTransactionError,
+    classify,
+    summarize,
+)
 from copybot.solana.rpc import TransactionPage
 
 log = structlog.get_logger(__name__)
@@ -34,9 +46,9 @@ DEFAULT_WINDOW = (4, 8)
 EXTEND_TO_S = 60
 # Precios de las primeras operaciones de la ventana que se promedian (mediana).
 FIRST_SWAPS = 5
+PAGE_SIZE = 100  # lo máximo por página: cuesta lo mismo que una más corta
+MAX_PAGES = 3  # por tramo de ventana
 USD_QUOTES = frozenset({"USDC", "USDT"})
-# Un precio de SOL estimado en otra consulta sirve si es de menos de 2 h de distancia.
-SOL_HINT_MAX_GAP_S = 7200
 
 
 class MintHistoryRpc(Protocol):
@@ -72,11 +84,14 @@ def swap_prices(
         if block_time is None:
             continue
         try:
-            events = classify(tx, None, relayers)
-        except MalformedTransactionError:
+            signers = set(summarize(tx, relayers).signers) - relayers
+            events = classify(tx, signers, relayers)
+        except (MalformedTransactionError, KeyError, IndexError, TypeError, ValueError):
             continue
         for ev in events:
             if ev.mint != mint or ev.kind not in (EventKind.BUY, EventKind.SELL):
+                continue
+            if ev.confidence == Confidence.LOW:
                 continue
             price = ev.price_in_quote
             if price is None or price <= 0 or ev.quote_symbol not in USD_QUOTES | {"SOL"}:
@@ -85,19 +100,9 @@ def swap_prices(
     return sorted(out, key=lambda p: p.offset_s)
 
 
-def usd_price(
-    prices: list[SwapPrice], sol_usd: Decimal | None
-) -> tuple[Decimal | None, Decimal | None, int]:
-    """(precio en USD, precio de SOL usado, operaciones usadas).
-
-    Mediana de las primeras operaciones. Las pagadas en SOL se convierten con el precio
-    de SOL de la propia ventana (si hay operaciones en USDC y en SOL a la vez) o con
-    ``sol_usd``; si no hay ninguno, se descartan.
-    """
-    usd = [p.price for p in prices if p.quote in USD_QUOTES]
-    sol = [p.price for p in prices if p.quote == "SOL"]
-    if usd and sol:
-        sol_usd = statistics.median(usd) / statistics.median(sol)
+def usd_price(prices: list[SwapPrice], sol_usd: Decimal | None) -> tuple[Decimal | None, int]:
+    """(precio en USD, operaciones usadas): mediana de las primeras operaciones. Las
+    pagadas en SOL se convierten con ``sol_usd``; sin él, se descartan."""
     converted = []
     for p in prices:
         if p.quote in USD_QUOTES:
@@ -107,8 +112,8 @@ def usd_price(
         if len(converted) == FIRST_SWAPS:
             break
     if not converted:
-        return None, sol_usd, 0
-    return statistics.median(converted), sol_usd, len(converted)
+        return None, 0
+    return statistics.median(converted), len(converted)
 
 
 class DelayedPrices:
@@ -118,14 +123,21 @@ class DelayedPrices:
         rpc: MintHistoryRpc | None,
         relayers: frozenset[str],
         *,
+        sol: SolUsd | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessions = sessions
         self._rpc = rpc
         self._relayers = relayers
+        self.sol = sol if sol is not None else SolUsd(sessions, rpc)
         self._clock = clock
-        self.lookups = 0  # consultas a Helius hechas
+        self._pages = 0
         self.missing = 0  # pedidas sin poder consultar (sin conexión permitida)
+
+    @property
+    def lookups(self) -> int:
+        """Páginas pedidas a Helius (10 créditos cada una), precio de SOL incluido."""
+        return self._pages + self.sol.lookups
 
     async def get(
         self,
@@ -147,13 +159,14 @@ class DelayedPrices:
         if not fetch or self._rpc is None:
             self.missing += 1
             return None
-        prices = await self._swaps(mint, at, lo, hi)
+        prices, pages = await self._swaps(mint, at, lo, hi)
         window_end = hi
         if not prices and extend_to > hi:
-            prices = await self._swaps(mint, at, hi, extend_to)
+            prices, more = await self._swaps(mint, at, hi, extend_to)
+            pages += more
             window_end = extend_to
-        hint = await self._sol_hint(at)
-        price, sol_usd, used = usd_price(prices, hint)
+        sol_usd = await self.sol.at(at + lo, fetch=True)
+        price, used = usd_price(prices, sol_usd)
         row = {
             "mint": mint,
             "at": at,
@@ -164,10 +177,11 @@ class DelayedPrices:
             "window_end": window_end,
             "sol_usd": sol_usd,
             "detail": {
+                "paginas": pages,
                 "operaciones": [
                     {"s": p.offset_s, "moneda": p.quote, "precio": str(p.price)}
                     for p in prices[:10]
-                ]
+                ],
             },
             "fetched_at": self._clock(),
         }
@@ -176,34 +190,26 @@ class DelayedPrices:
         async with self._sessions() as s:
             return await s.get(DelayedPrice, (mint, at, lo, hi))
 
-    async def _swaps(self, mint: str, at: int, lo: int, hi: int) -> list[SwapPrice]:
+    async def _swaps(self, mint: str, at: int, lo: int, hi: int) -> tuple[list[SwapPrice], int]:
         if self._rpc is None:
             raise RuntimeError("sin cliente de Helius")
-        self.lookups += 1
-        page = await self._rpc.get_transactions_for_address(
-            mint,
-            full=True,
-            limit=40,
-            sort_order="asc",
-            block_time_gte=at + lo,
-            block_time_lt=at + hi,
-        )
-        return swap_prices(page.items, mint, at, self._relayers)
-
-    async def _sol_hint(self, at: int) -> Decimal | None:
-        """Precio de SOL de la consulta guardada más cercana en el tiempo."""
-        async with self._sessions() as s:
-            row = await s.execute(
-                select(DelayedPrice.sol_usd, DelayedPrice.at)
-                .where(
-                    DelayedPrice.sol_usd.is_not(None),
-                    func.abs(DelayedPrice.at - at) <= SOL_HINT_MAX_GAP_S,
-                )
-                .order_by(func.abs(DelayedPrice.at - at))
-                .limit(1)
+        prices: list[SwapPrice] = []
+        token = None
+        pages = 0
+        while pages < MAX_PAGES:
+            pages += 1
+            self._pages += 1
+            page = await self._rpc.get_transactions_for_address(
+                mint,
+                full=True,
+                limit=PAGE_SIZE,
+                sort_order="asc",
+                block_time_gte=at + lo,
+                block_time_lt=at + hi,
+                pagination_token=token,
             )
-            found = row.first()
-        return None if found is None else found[0]
-
-    async def sol_usd_near(self, at: int) -> Decimal | None:
-        return await self._sol_hint(at)
+            prices += swap_prices(page.items, mint, at, self._relayers)
+            token = page.pagination_token
+            if len(prices) >= FIRST_SWAPS or len(page.items) < PAGE_SIZE or not token:
+                break
+        return sorted(prices, key=lambda p: p.offset_s), pages

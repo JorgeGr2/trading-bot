@@ -285,6 +285,10 @@ class _Run:
         if ev.at < self.start or ev.at >= self.end or ev.kind not in ("buy", "sell"):
             return
         await self.expire(ev.at)
+        held = any(p.mint == ev.mint for p in self.open.values())
+        if ev.kind == "sell" and not held:
+            self.roll(ev.at)
+            return  # nada que vender ni que vigilar: ni siquiera se pide el precio
         trader_price = await self.bt._trader_price(ev)
         if trader_price is not None:
             await self.observe(ev.mint, ev.at, trader_price)

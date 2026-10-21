@@ -30,7 +30,7 @@ class UniverseParams:
     liquidity_days: int = 30
     min_median_quote_volume: float = 5_000_000  # USDT al día (mediana de 30 días)
     max_rank_by_liquidity: int = 100
-    quality_days: int = 90  # sin huecos ni saltos raros en este periodo
+    quality_days: int = 100  # sin huecos ni saltos raros (cubre la SMA100 y 91 días atrás)
     max_jump: float = 4.0  # un cierre ×4 o ÷4 del anterior: redenominación o error
     min_daily_vol: float = 0.005  # por debajo: moneda anclada (estable)
     vol_days: int = 60
@@ -71,10 +71,11 @@ def universe(panel: Panel, day: date, p: UniverseParams | None = None) -> Univer
     bases = frozenset(s.base for s in panel.series.values())
     excluded: dict[str, str] = {}
     candidates: list[tuple[Series, float]] = []
+    gaps = panel.global_gaps()
     for series in panel.series.values():
         i = series.at(day)
-        if i is None:
-            continue  # no cotizaba ese día (aún no listada o ya retirada)
+        if i is None or not series.traded(i):
+            continue  # no cotizaba ese día (aún no listada, ya retirada o sin negociación)
         if series.base in STABLE_BASES:
             excluded[series.symbol] = "moneda estable o divisa"
             continue
@@ -84,14 +85,17 @@ def universe(panel: Panel, day: date, p: UniverseParams | None = None) -> Univer
         if _leveraged(series, bases):
             excluded[series.symbol] = "token apalancado"
             continue
-        if i + 1 < p.min_age_days:
-            excluded[series.symbol] = (
-                f"solo lleva {i + 1} días en Binance (mínimo {p.min_age_days})"
-            )
+        age = (day - series.days[series.episode_start(i)]).days + 1
+        if age < p.min_age_days:
+            excluded[series.symbol] = f"solo lleva {age} días en Binance (mínimo {p.min_age_days})"
             continue
-        q0 = max(0, i - p.quality_days + 1)
-        window_days = series.days[q0 : i + 1]
-        if window_days[-1] - window_days[0] != timedelta(days=len(window_days) - 1):
+        q0 = series.index(day - timedelta(days=p.quality_days - 1))
+        q0 = 0 if q0 is None else q0
+        if series.days[q0] < day - timedelta(days=p.quality_days - 1):
+            q0 += 1
+        traded = {series.days[k] for k in range(q0, i + 1) if series.traded(k)}
+        needed = {day - timedelta(days=k) for k in range(p.quality_days)} - gaps
+        if not needed <= traded:
             excluded[series.symbol] = f"le faltan velas en los últimos {p.quality_days} días"
             continue
         closes = series.close[q0 : i + 1]

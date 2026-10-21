@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,6 +22,7 @@ from copybot.backtest.data import (
     UNIVERSES,
     DelayedQuotes,
     load_events,
+    only_while_selected,
     select_traders,
     transfer_fees,
     universe,
@@ -30,7 +31,7 @@ from copybot.backtest.data import (
 from copybot.backtest.delayed import DelayedPrices
 from copybot.backtest.poolprice import ASSETS, HOUR, SOL, PoolPrices
 from copybot.backtest.references import RefParams, RefResult, references
-from copybot.backtest.report import Coverage, Scenario, render
+from copybot.backtest.report import Coverage, Round, Scenario, render
 from copybot.config import RiskLimits, Settings
 from copybot.solana.addresses import validate_address
 from copybot.traders_cli import context, parse_as_of
@@ -61,7 +62,13 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     c.add_argument("--until", help="fin del periodo copiado (por defecto, ahora)")
     c.add_argument("--wallet", action="append", default=[], help="copiar estas wallets")
-    c.add_argument("--top", type=int, default=10, help="como mucho N traders seleccionados")
+    c.add_argument("--top", type=int, default=10, help="como mucho N traders por selección")
+    c.add_argument(
+        "--rebalance-days",
+        type=int,
+        default=7,
+        help="repetir la selección cada N días (0: una sola vez, al principio)",
+    )
     c.add_argument(
         "--universe",
         choices=UNIVERSES,
@@ -96,32 +103,53 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         if args.wallet:
             selected = [validate_address(w) for w in args.wallet]
             select_as_of = None  # elegidos a mano: no es una selección fuera de muestra
-            selection = await select_traders(ctx.repo, selected, start, args.select_window)
+            rounds = [
+                Round(
+                    start,
+                    await select_traders(ctx.repo, selected, start, args.select_window),
+                    selected,
+                )
+            ]
         else:
             if select_as_of is None:
                 raise SystemExit(
                     "Sin --wallet hace falta --select-as-of para elegir a los traders."
                 )
             candidates = await universe(sessions, args.universe)
-            print(
-                f"Analizando {len(candidates)} traders (universo: {args.universe}) a fecha "
-                f"{select_as_of:%Y-%m-%d}…"
-            )
-            selection = await select_traders(ctx.repo, candidates, select_as_of, args.select_window)
-            selected = [s.wallet for s in selection if s.eligible and (s.score or 0) > 0]
-            selected = selected[: args.top]
+            step = timedelta(days=args.rebalance_days) if args.rebalance_days > 0 else None
+            rounds = []
+            when = select_as_of
+            while when < until:
+                print(
+                    f"Analizando {len(candidates)} traders (universo: {args.universe}) a "
+                    f"fecha {when:%Y-%m-%d}…"
+                )
+                selection = await select_traders(ctx.repo, candidates, when, args.select_window)
+                chosen = [s.wallet for s in selection if s.eligible and (s.score or 0) > 0]
+                rounds.append(Round(when, selection, chosen[: args.top]))
+                if step is None:
+                    break
+                when += step
+            selected = sorted({w for r in rounds for w in r.chosen})
         if not selected:
-            print("Ningún trader con ventaja a esa fecha: no hay nada que copiar.")
+            print("Ningún trader con ventaja en ninguna selección: no hay nada que copiar.")
             return 0
-        events = await load_events(sessions, selected, until)
         t0, t1 = int(start.timestamp()), int(until.timestamp())
+        windows: dict[str, list[tuple[int, int]]] = {}
+        for i, r in enumerate(rounds):
+            begin = max(t0, int(r.as_of.timestamp()))
+            finish = int(rounds[i + 1].as_of.timestamp()) if i + 1 < len(rounds) else t1
+            for wallet in r.chosen:
+                windows.setdefault(wallet, []).append((begin, finish))
+        events = only_while_selected(await load_events(sessions, selected, until), windows)
         in_period = [e for e in events if t0 <= e.at < t1 and e.kind in ("buy", "sell")]
         buys = sum(1 for e in in_period if e.kind == "buy")
         hours = (t1 - t0) // HOUR
         refs_hours = 0 if args.no_references else (hours + 24) * (len(ASSETS) - 1)
         expected = int(len(in_period) * 1.5) + hours + refs_hours
         print(
-            f"{len(selected)} traders; {buys} compras y {len(in_period) - buys} ventas que "
+            f"{len(selected)} traders en {len(rounds)} selecciones; {buys} compras y "
+            f"{len(in_period) - buys} ventas que "
             f"copiar ({start:%Y-%m-%d %H:%M} → {until:%Y-%m-%d %H:%M} UTC). Consultas "
             f"previstas si no hay nada en caché: unas {expected} (≈{expected * 10:,} créditos), "
             f"precios horarios de SOL y de las referencias incluidos."
@@ -169,9 +197,8 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                     ref_lookups += pool.lookups
         text = render(
             scenarios,
-            selection,
-            selected=selected,
-            select_as_of=select_as_of,
+            rounds,
+            out_of_sample=select_as_of is not None,
             select_window=args.select_window if select_as_of else None,
             universe=None if args.wallet else args.universe,
             lookups=quotes.lookups + ref_lookups,

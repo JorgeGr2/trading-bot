@@ -239,3 +239,45 @@ async def test_cost_multiplier_scales_network_fees_too():
     fee = D(105_000) / D(10**9) * 200
     assert a.exits[0].tokens == (10 - fee) / D("0.01")
     assert b.exits[0].tokens == (10 - 2 * fee) / D("0.01")
+
+
+async def test_buys_are_copied_only_while_the_trader_is_selected():
+    from datetime import UTC, datetime
+
+    from copybot.backtest.data import Selection, only_while_selected
+    from copybot.backtest.report import Round, Scenario, render
+
+    prices = Prices()
+    for t in (0, 100, 200):
+        prices.at[("M1", T0 + t)] = D("0.01")
+    events = [
+        ev("buy", 0, "1000", "10", n=0),  # antes de elegirlo: solo saldo
+        ev("buy", 100, "1000", "10", n=1),  # elegido: se copia
+        ev("sell", 200, "2000", "20", n=2),  # vende todo: cerramos con él
+    ]
+    events = only_while_selected(events, {W: [(T0 + 50, T0 + 150)]})
+    result = await run(events, prices)
+    (pos,) = result.book(SIGNALS)
+    assert pos.opened_at == T0 + 100 and pos.status == "closed"
+    when = datetime.fromtimestamp(T0 + 50, UTC)
+    text = render(
+        [Scenario("prueba", result, CONSERVATIVE)],
+        [Round(when, [Selection(W, D(70), True, 30, D("0.1"))], [W])],
+        out_of_sample=True,
+        select_window=21,
+        universe="actividad",
+        lookups=0,
+        missing=0,
+        seed=7,
+    )
+    assert "| prueba | señales | 1 |" in text and "fuera de muestra" in text
+    assert text == render(
+        [Scenario("prueba", result, CONSERVATIVE)],
+        [Round(when, [Selection(W, D(70), True, 30, D("0.1"))], [W])],
+        out_of_sample=True,
+        select_window=21,
+        universe="actividad",
+        lookups=0,
+        missing=0,
+        seed=7,
+    )  # mismo informe con los mismos datos y la misma semilla

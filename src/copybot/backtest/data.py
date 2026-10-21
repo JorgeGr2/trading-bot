@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -121,6 +121,20 @@ class DelayedQuotes:
         if row is None:
             return None
         return Quote(row.price_usd, row.sol_usd)
+
+
+def only_while_selected(
+    events: Iterable[TraderEvent], windows: dict[str, list[tuple[int, int]]]
+) -> list[TraderEvent]:
+    """Las compras de un trader solo se copian en los periodos ``[desde, hasta)`` en que
+    está elegido; las demás cuentan solo para su saldo. Sus ventas se siguen siempre (si
+    tenemos posición, la cerramos con él)."""
+    out = []
+    for ev in events:
+        if ev.kind == "buy" and not any(a <= ev.at < b for a, b in windows.get(ev.wallet, ())):
+            ev = replace(ev, kind="transfer_in")
+        out.append(ev)
+    return out
 
 
 async def transfer_fees(

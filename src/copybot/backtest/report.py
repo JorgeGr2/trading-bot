@@ -76,12 +76,21 @@ def data_hash(scenarios: list[Scenario], selection: list[Selection]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
+@dataclass(frozen=True)
+class Round:
+    """Una selección: a fecha ``as_of`` se analizan los candidatos y se copian los
+    elegidos hasta la selección siguiente."""
+
+    as_of: datetime
+    selection: list[Selection]  # todos los analizados, de mejor a peor
+    chosen: list[str]
+
+
 def render(
     scenarios: list[Scenario],
-    selection: list[Selection],
+    rounds: list[Round],
     *,
-    selected: list[str],
-    select_as_of: datetime | None,
+    out_of_sample: bool,
     select_window: int | None,
     universe: str | None = None,
     lookups: int,
@@ -100,10 +109,16 @@ def render(
         "",
         f"- Periodo copiado: {_date(main.start)} → {_date(main.end)} UTC",
     ]
-    if select_as_of is not None:
+    if out_of_sample:
+        every = (
+            f"cada {(rounds[1].as_of - rounds[0].as_of).days} días"
+            if len(rounds) > 1
+            else "una vez"
+        )
         out.append(
-            f"- Selección **fuera de muestra**: traders elegidos con sus datos hasta el "
-            f"{select_as_of:%Y-%m-%d} (ventana de {select_window} días); se copian después."
+            f"- Selección **fuera de muestra**, {every}: en cada fecha se eligen los traders "
+            f"con ventaja usando solo sus {select_window} días anteriores y se copian sus "
+            "compras hasta la selección siguiente (sus ventas, mientras haya posición)."
         )
         if universe == "actividad":
             out.append("- Universo: traders descubiertos por su actividad, no por lo que ganaban.")
@@ -115,33 +130,32 @@ def render(
             )
     else:
         out.append("- Traders elegidos a mano (no es una selección fuera de muestra).")
+    chosen = [s for r in rounds for s in r.selection if s.wallet in r.chosen]
     out += [
         f"- Retraso: precio de las operaciones de otros entre {main.params.delay[0]} y "
         f"{main.params.delay[1]} s después (hasta 60 s si no hubo ninguna)",
         f"- Consultas nuevas a Helius: {lookups} (≈{lookups * 10:,} créditos); precios que "
         f"faltaban en caché sin consultar: {missing}",
-        f"- Semilla del bootstrap: {seed}; huella de los datos: "
-        f"`{data_hash(scenarios, selection)}`",
+        f"- Semilla del bootstrap: {seed}; huella de los datos: `{data_hash(scenarios, chosen)}`",
         "",
-        "## Traders",
+        "## Traders elegidos",
         "",
-        "| Trader | Puntuación a la fecha de selección | Operaciones | Rentabilidad prudente "
-        "| ¿Copiado? |",
+        "| Fecha de selección | Trader | Puntuación | Operaciones | Rentabilidad prudente |",
         "|---|---|---|---|---|",
     ]
-    others = 0
-    for s in selection:
-        if s.wallet not in selected and not (s.score or 0) > 0:
-            others += 1
-            continue
-        prudent = None if s.prudent_mean_return is None else s.prudent_mean_return * 100
-        score = "—" if s.score is None else f"{s.score:.1f}"
-        copied = "sí" if s.wallet in selected else "no"
-        out.append(
-            f"| `{_short(s.wallet)}` | {score} | {s.round_trips} | {_pct(prudent)} | {copied} |"
-        )
-    if others:
-        out.append(f"\n{others} traders más sin ventaja a esa fecha (puntuación 0 o excluidos).")
+    for r in rounds:
+        picked = [s for s in r.selection if s.wallet in r.chosen]
+        if not picked:
+            out.append(
+                f"| {r.as_of:%Y-%m-%d} | ninguno de {len(r.selection)} con ventaja | — | — | — |"
+            )
+        for s in picked:
+            prudent = None if s.prudent_mean_return is None else s.prudent_mean_return * 100
+            score = "—" if s.score is None else f"{s.score:.1f}"
+            out.append(
+                f"| {r.as_of:%Y-%m-%d} | `{_short(s.wallet)}` | {score} | {s.round_trips} | "
+                f"{_pct(prudent)} |"
+            )
     out += ["", "## Resultados por escenario", ""]
     out.append(
         "| Escenario | Libro | Operaciones | Resultado | Media por operación (IC 95 %) "

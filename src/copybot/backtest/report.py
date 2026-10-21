@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from copybot.backtest.copy import PORTFOLIO, SIGNALS, CopyPosition, CopyResult
 from copybot.backtest.data import Selection
+from copybot.backtest.references import RefParams, RefResult
 from copybot.backtest.stats import TradeStats, max_drawdown_pct, trade_stats
 
 ZERO = Decimal(0)
@@ -21,6 +22,13 @@ ZERO = Decimal(0)
 class Scenario:
     name: str
     result: CopyResult
+
+
+@dataclass(frozen=True)
+class Coverage:
+    asset: str
+    hours_with_price: int
+    hours: int
 
 
 def _short(address: str) -> str:
@@ -68,6 +76,9 @@ def render(
     lookups: int,
     missing: int,
     seed: int,
+    references: list[tuple[RefResult, RefResult]] | None = None,
+    ref_params: RefParams | None = None,
+    coverage: list[Coverage] | None = None,
 ) -> str:
     main = scenarios[0].result
     out = [
@@ -140,6 +151,9 @@ def render(
             + (f" Aviso: {warning}." if warning else "")
         )
 
+    if references or coverage:
+        out += _references_section(scenarios, references or [], ref_params, coverage or [])
+
     sig = main.book(SIGNALS)
     comparable = [p for p in sig if p.status != "open" and p.theo_pnl_usd is not None]
     slippages = [p.entry_slippage_pct for p in sig if p.entry_slippage_pct is not None]
@@ -188,3 +202,53 @@ def render(
         for why, n in sorted(main.skipped.items(), key=lambda kv: -kv[1]):
             out.append(f"- {n} × {why}")
     return "\n".join(out) + "\n"
+
+
+def _references_section(
+    scenarios: list[Scenario],
+    refs: list[tuple[RefResult, RefResult]],
+    params: RefParams | None,
+    coverage: list[Coverage],
+) -> list[str]:
+    out = [
+        "",
+        "## Frente a otras inversiones (mismo periodo y mismo capital)",
+        "",
+        "| Estrategia | Activo | Final | Rentabilidad | Caída máxima | Operaciones "
+        "| Final con costes al doble |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for sc in scenarios:
+        r = sc.result
+        final = r.equity_curve[-1][1] if r.equity_curve else r.initial_usd
+        ret = (final / r.initial_usd - 1) * 100
+        out.append(
+            f"| copy-trading: {sc.name} | memecoins | {final:,.2f} $ | {_pct(ret)} | "
+            f"{max_drawdown_pct(r.equity_curve):.1f} % | {len(r.book(PORTFOLIO))} | — |"
+        )
+    for base, doubled in sorted(refs, key=lambda pair: -pair[0].final_usd):
+        out.append(
+            f"| {base.strategy} | {base.asset} | {base.final_usd:,.2f} $ | "
+            f"{_pct(base.return_pct)} | {base.max_drawdown_pct:.1f} % | {base.trades} | "
+            f"{doubled.final_usd:,.2f} $ |"
+        )
+    if scenarios:
+        initial = scenarios[0].result.initial_usd
+        out.append(f"| dejarlo en USDC | — | {initial:,.2f} $ | +0.0 % | 0.0 % | 0 | — |")
+    out.append("")
+    if params is not None:
+        out.append(
+            f"- Costes de las referencias: {params.cost_pct} % por operación (comisión del "
+            f"pool y deslizamiento) y {params.tx_fee_usd} $ de red; al final se vende todo. "
+            "Precios: el primer swap de cada hora en pools contra USDC de Solana (cbBTC para "
+            "BTC, ETH de Wormhole, SPYx de xStocks, que solo sigue al S&P 500 con la bolsa "
+            "abierta). La tendencia decide con el precio de una hora y opera en la siguiente."
+        )
+    for cov in coverage:
+        if cov.hours_with_price < cov.hours:
+            out.append(
+                f"- {cov.asset}: precio en {cov.hours_with_price} de {cov.hours} horas"
+                + (" (sin datos: no se compara)" if not cov.hours_with_price else "")
+                + "."
+            )
+    return out

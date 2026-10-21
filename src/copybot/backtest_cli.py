@@ -2,8 +2,11 @@
 
 copybot backtest copy --select-as-of 2026-10-05 [--select-window 21] [--until …]
                       [--wallet W …] [--top 10] [--fetch --max-lookups 2000] [--out F]
+                      [--no-references]
 
-Sin ``--fetch`` solo usa los precios ya guardados en caché (no gasta créditos).
+Sin ``--fetch`` solo usa los precios ya guardados en caché (no gasta créditos). Salvo con
+``--no-references``, compara también con comprar y mantener, la compra semanal y el
+seguimiento de tendencia de SOL, BTC, ETH y SPYx en el mismo periodo.
 """
 
 from __future__ import annotations
@@ -22,7 +25,9 @@ from copybot.backtest.data import (
     transfer_fees,
 )
 from copybot.backtest.delayed import DelayedPrices
-from copybot.backtest.report import Scenario, render
+from copybot.backtest.poolprice import ASSETS, HOUR, SOL, PoolPrices
+from copybot.backtest.references import RefParams, RefResult, references
+from copybot.backtest.report import Coverage, Scenario, render
 from copybot.config import RiskLimits, Settings
 from copybot.solana.addresses import validate_address
 from copybot.traders_cli import context, parse_as_of
@@ -55,6 +60,9 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     c.add_argument("--seed", type=int, default=7)
     c.add_argument("--out", help="guardar el informe en este fichero")
+    c.add_argument(
+        "--no-references", action="store_true", help="sin comparar con SOL, BTC, ETH y SPYx"
+    )
 
 
 async def run(args: argparse.Namespace, settings: Settings) -> int:
@@ -115,15 +123,29 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         for name, params, limits in plans:
             bt = CopyBacktest(quotes, params, limits, transfer_fee_bps=fees)
             scenarios.append(Scenario(name, await bt.run(events, t0, t1)))
+        refs: list[tuple[RefResult, RefResult]] = []
+        coverage: list[Coverage] = []
+        ref_lookups = 0
+        if not args.no_references:
+            for asset in ASSETS.values():
+                pool = prices.sol if asset is SOL else PoolPrices(sessions, ctx.rpc, asset)
+                refs_asset, cov = await _references(pool, t0, t1, fetch=args.fetch)
+                refs += refs_asset
+                coverage.append(cov)
+                if pool is not prices.sol:
+                    ref_lookups += pool.lookups
         text = render(
             scenarios,
             selection,
             selected=selected,
             select_as_of=select_as_of,
             select_window=args.select_window if select_as_of else None,
-            lookups=quotes.lookups,
+            lookups=quotes.lookups + ref_lookups,
             missing=quotes.missing,
             seed=args.seed,
+            references=refs,
+            ref_params=RefParams(),
+            coverage=coverage,
         )
         if args.out:
             await asyncio.to_thread(Path(args.out).write_text, text, encoding="utf-8")
@@ -135,6 +157,26 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                 "consultarlos (gasta créditos de Helius)."
             )
     return 0
+
+
+async def _references(
+    pool: PoolPrices, t0: int, t1: int, *, fetch: bool
+) -> tuple[list[tuple[RefResult, RefResult]], Coverage]:
+    """Referencias de un activo con costes medidos y al doble (mismo orden)."""
+    base = RefParams()
+    series = await pool.hourly(t0 - base.trend_hours * HOUR, t1, fetch=fetch)
+    hours = len(range(t0 - t0 % HOUR, t1 + 1, HOUR))
+    have = sum(1 for t, _ in series if t >= t0)
+    cov = Coverage(pool.asset.name, have, hours)
+    if not have:
+        return [], cov
+    doubled = RefParams(cost_multiplier=Decimal(2))
+    pairs = zip(
+        references(pool.asset.name, series, t0, t1, base),
+        references(pool.asset.name, series, t0, t1, doubled),
+        strict=True,
+    )
+    return list(pairs), cov
 
 
 def _with(params: CopyParams, **changes) -> CopyParams:

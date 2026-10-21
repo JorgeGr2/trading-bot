@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from copybot.backtest.delayed import DelayedPrices, SwapPrice, swap_prices, usd_price
-from copybot.backtest.solusd import SOL_USDC_POOLS, SolUsd, pool_swaps
+from copybot.backtest.poolprice import SOL, PoolPrices, pool_swaps
 from copybot.db.session import make_sessionmaker
 from copybot.solana.constants import TOKEN_PROGRAM, USDC_MINT, WSOL_MINT
 from tests.fakes import MEME, RELAYER, FakeHistoryRpc, fomo_like_swap
@@ -16,7 +16,7 @@ D = Decimal
 T = 1_791_000_000  # en punto
 OTHER = "Other11111111111111111111111111111111111111"
 TEMP = "TempWsolAccount1111111111111111111111111111"
-POOL = SOL_USDC_POOLS[0]
+POOL = SOL.pools[0]
 
 
 def swap(sig: str, at: int, tokens: int, usdc: int) -> dict:
@@ -91,9 +91,9 @@ def test_pool_swaps_read_the_pool_accounts():
         pool_tx(T + 1, -2 * 10**9, 240 * 10**6),  # el pool entrega 2 SOL y recibe 240 USDC
         pool_tx(T + 2, 10**9, -119 * 10**6),  # recibe 1 SOL y entrega 119 USDC
         pool_tx(T + 3, 0, 0),  # un bot que pasa por el pool sin cambiar nada
-        pool_tx(T + 4, 10**6, -121_000),  # 0,001 SOL: demasiado pequeño
+        pool_tx(T + 4, 10**6, -121_000),  # 0,12 USDC: demasiado pequeño
     ]
-    assert [(s.at, s.price, s.sol) for s in pool_swaps(txs, POOL)] == [
+    assert [(s.at, s.price, s.amount) for s in pool_swaps(txs, POOL, WSOL_MINT)] == [
         (T + 1, D(120), D(2)),
         (T + 2, D(119), D(1)),
     ]
@@ -106,10 +106,10 @@ async def test_sol_price_is_interpolated_between_hourly_samples(engine):
         rpc.add(POOL, pool_tx(T + i, -(10**9), 120 * 10**6))
         rpc.add(POOL, pool_tx(T + 3600 + i, -(10**9), 130 * 10**6))
     sessions = make_sessionmaker(engine)
-    sol = SolUsd(sessions, rpc)
+    sol = PoolPrices(sessions, rpc)
     assert await sol.at(T + 900, fetch=True) == D("122.5")
     assert len(rpc.calls) == 2 and sol.lookups == 2  # una muestra por hora, primer pool
-    cached = SolUsd(sessions, None)
+    cached = PoolPrices(sessions, None)
     assert await cached.at(T + 1800, fetch=False) == D(125)
     assert await cached.at(T + 7200 * 5, fetch=False) is None
 
@@ -142,6 +142,20 @@ async def test_busy_windows_are_paged(engine):
         rpc.add(MEME, swap(f"n{i:09d}", T + 5, 0, 0), tx_index=i)
     rpc.add(MEME, swap("y" * 10, T + 6, 1_000_000, -10_000), tx_index=999)
     sessions = make_sessionmaker(engine)
-    prices = DelayedPrices(sessions, rpc, frozenset({RELAYER}), sol=SolUsd(sessions, None))
+    prices = DelayedPrices(sessions, rpc, frozenset({RELAYER}), sol=PoolPrices(sessions, None))
     row = await prices.get(MEME, T)
     assert row.price_usd == D("0.01") and row.detail["paginas"] == 3
+
+
+@pytest.mark.postgres
+async def test_pool_samples_page_past_the_bots_and_series_is_hourly(engine):
+    rpc = FakeHistoryRpc(credits_per_call=10)
+    for i in range(150):  # bots que pasan por el pool sin cambiar nada
+        rpc.add(POOL, pool_tx(T, 0, 0), tx_index=i)
+    for i in range(3):
+        rpc.add(POOL, pool_tx(T + 1 + i, -(10**9), 150 * 10**6))
+        rpc.add(POOL, pool_tx(T + 7200 + i, -(10**9), 160 * 10**6))
+    sol = PoolPrices(make_sessionmaker(engine), rpc)
+    series = await sol.hourly(T, T + 7200, fetch=True)
+    assert series == [(T, D(150)), (T + 7200, D(160))]  # la hora T+3600 no tiene swaps
+    assert sol.lookups == 2 + 2 + 1  # T: 2 páginas; T+3600: 2 pools vacíos; T+7200: 1

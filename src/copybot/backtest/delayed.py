@@ -10,7 +10,7 @@ Cuenta cualquier firmante de la transacción, también el que paga la comisión 
 swap normal es el propio usuario; en FOMO es el relayer, que se descarta). Muchas
 transacciones son de bots que no llegan a cambiar ningún saldo: si una página no da
 bastantes operaciones se piden más, hasta ``MAX_PAGES``. Las operaciones pagadas en SOL
-se pasan a dólares con el precio de SOL de los pools SOL-USDC (``solusd``).
+se pasan a dólares con el precio de SOL de los pools SOL-USDC (``poolprice``).
 
 Cada página cuesta 10 créditos de Helius y el resultado se guarda en
 ``backtest_delayed_prices``: repetir el backtest no vuelve a gastar y da lo mismo.
@@ -29,7 +29,7 @@ import structlog
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from copybot.backtest.solusd import SolUsd
+from copybot.backtest.poolprice import SOL, PoolPrices
 from copybot.db.models import DelayedPrice
 from copybot.solana.classifier import (
     Confidence,
@@ -123,13 +123,13 @@ class DelayedPrices:
         rpc: MintHistoryRpc | None,
         relayers: frozenset[str],
         *,
-        sol: SolUsd | None = None,
+        sol: PoolPrices | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessions = sessions
         self._rpc = rpc
         self._relayers = relayers
-        self.sol = sol if sol is not None else SolUsd(sessions, rpc)
+        self.sol = sol if sol is not None else PoolPrices(sessions, rpc, SOL)
         self._clock = clock
         self._pages = 0
         self.missing = 0  # pedidas sin poder consultar (sin conexión permitida)

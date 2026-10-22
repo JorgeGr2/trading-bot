@@ -863,7 +863,8 @@ class CryptoPaperPosition(Base):
             "book",
             "symbol",
             unique=True,
-            postgresql_where=text("status = 'open'"),
+            # Solo la cartera: el libro de señales abre la misma moneda varios días seguidos.
+            postgresql_where=text("status = 'open' AND book = 'portfolio'"),
         ),
     )
 

@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import math
 import statistics
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from zoneinfo import ZoneInfo
 
 MADRID = ZoneInfo("Europe/Madrid")
@@ -44,6 +45,8 @@ MONTHS_SHORT = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "
 # --- Métricas informativas (apartado 10.2) ----------------------------------------------
 BEST_DAY_WINDOW = 30  # días de la ventana del «peso del mejor día»
 BEST_DAY_WARNING = 0.6  # por encima: aviso de «subida de un solo día»
+BEST_DAY_MIN_RISE = 0.10  # por debajo de un +10 % en 30 días el peso no se calcula
+BEST_DAY_SPREAD = 0.5  # hasta aquí se puede decir que «la subida está repartida»
 YEAR_DAYS = 365  # velas necesarias para medir la «semana mala»
 WEEK_DAYS = 7
 
@@ -117,6 +120,17 @@ ALLOWED_DISCLAIMERS = (
 # =========================================================================================
 
 
+def _finite(x: float | int | Decimal | None) -> float | None:
+    """``x`` como ``float`` si es un número finito; ``None`` si falta, es NaN o infinito."""
+    if x is None:
+        return None
+    try:
+        value = float(x)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _decimal(x: float | int | Decimal) -> Decimal | None:
     if isinstance(x, Decimal):
         value = x
@@ -144,8 +158,10 @@ def fmt_num(x: float | int | Decimal | None, decimals: int = 0, *, sign: bool = 
     value = _decimal(x)
     if value is None:
         return NO_DATA
-    q = value.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
-    int_part, _, frac = f"{abs(q):f}".partition(".")
+    with localcontext() as ctx:  # sin límite práctico de cifras: nunca falla por tamaño
+        ctx.prec = max(ctx.prec, value.adjusted() + decimals + 3)
+        q = value.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+    int_part, _, frac = f"{q.copy_abs():f}".partition(".")
     text = _group_thousands(int_part) + (f",{frac}" if decimals > 0 else "")
     if q < 0:
         return MINUS + text
@@ -166,21 +182,20 @@ def fmt_pct(x: float | Decimal | None, decimals: int = 1, sign: bool = True) -> 
 
 def fmt_usd(x: float | Decimal | None, decimals: int = 2, *, sign: bool = False) -> str:
     """Dólares: 1234,5 → «1.234,50 $»."""
-    if x is None:
-        return NO_DATA
-    return f"{fmt_num(x, decimals, sign=sign)} $"
+    text = fmt_num(x, decimals, sign=sign)
+    return NO_DATA if text == NO_DATA else f"{text} $"
 
 
 def fmt_musd(x: float | Decimal | None) -> str:
-    """Volumen en millones de dólares: 2.100.000.000 → «2.100 M$». Por debajo de 10 M$,
-    con un decimal («1,2 M$»)."""
+    """Volumen en millones de dólares: 2.100.000.000 → «2.100 M$». Por debajo de 10 M$
+    (ya redondeado), con un decimal («1,2 M$»; 9,96 M$ → «10 M$»)."""
     if x is None:
         return NO_DATA
     value = _decimal(x)
     if value is None:
         return NO_DATA
     millions = value / 1_000_000
-    return f"{fmt_num(millions, 1 if abs(millions) < 10 else 0)} M$"
+    return f"{fmt_num(millions, 1 if abs(millions) < Decimal('9.95') else 0)} M$"
 
 
 def fmt_points(score: float | None) -> str:
@@ -191,24 +206,26 @@ def fmt_points(score: float | None) -> str:
 def fmt_pp(diff: float | None) -> str:
     """Diferencia de rentabilidades (fracción) en puntos: 0,09 → «+9 puntos». Es la
     columna «Frente a BTC (30 d)»: ``m_{i,30} − m_{BTC,30}``."""
-    if diff is None:
+    value = None if diff is None else _decimal(diff)
+    if value is None:
         return NO_DATA
-    text = fmt_num(diff * 100, 0, sign=True)
+    text = fmt_num(value * 100, 0, sign=True)
     return f"{text} {'punto' if text.lstrip('+' + MINUS) == '1' else 'puntos'}"
 
 
 def fmt_vol(sigma: float | None, decimals: int = 1) -> str:
     """«Se mueve al día»: σ diaria como «±3,9 %»."""
-    if sigma is None:
+    if _finite(sigma) is None:
         return NO_DATA
     return f"±{fmt_pct(sigma, decimals, sign=False)}"
 
 
 def fmt_trend(trend_share: float | None) -> str:
     """Tendencia: fracción de medias (20, 50 y 100) por encima de las que cierra → «2 de 3»."""
-    if trend_share is None:
+    share = _finite(trend_share)
+    if share is None:
         return NO_DATA
-    return f"{round(trend_share * 3)} de 3"
+    return f"{round(share * 3)} de 3"
 
 
 # =========================================================================================
@@ -270,14 +287,15 @@ def ret(closes: Sequence[float], days: int) -> float | None:
     """Rentabilidad simple a ``days`` días: ``C(t)/C(t−L) − 1``. ``None`` sin historia."""
     if days <= 0 or len(closes) <= days:
         return None
-    base, last = closes[-1 - days], closes[-1]
-    if base <= 0 or last <= 0:
+    base, last = _finite(closes[-1 - days]), _finite(closes[-1])
+    if base is None or last is None or base <= 0 or last <= 0:
         return None
     return last / base - 1
 
 
 def _window_ok(closes: Sequence[float], n: int) -> bool:
-    return len(closes) >= n and all(c > 0 for c in closes[-n:])
+    """Hay ``n`` cierres al final y todos son números finitos y positivos."""
+    return len(closes) >= n and all((_finite(c) or 0.0) > 0 for c in closes[-n:])
 
 
 def best_day(closes: Sequence[float]) -> tuple[int, float] | None:
@@ -292,12 +310,13 @@ def best_day(closes: Sequence[float]) -> tuple[int, float] | None:
 
 def best_day_share(closes: Sequence[float]) -> float | None:
     """Peso del mejor día: ``máx r_i`` de los últimos 30 días ÷ ``ln(1 + R30)``, con
-    rendimientos logarítmicos. ``None`` si R30 ≤ 0 (no hay subida que repartir) o sin
-    historia. Puede pasar de 1 si el resto de días restaron."""
+    rendimientos logarítmicos. ``None`` si la subida de 30 días no llega al
+    ``BEST_DAY_MIN_RISE`` (con subidas pequeñas el cociente se dispara y no dice nada) o
+    sin historia. Puede pasar de 1 si el resto de días restaron."""
     if not _window_ok(closes, BEST_DAY_WINDOW + 1):
         return None
     total = math.log(closes[-1] / closes[-1 - BEST_DAY_WINDOW])
-    if total <= 0:
+    if total <= math.log1p(BEST_DAY_MIN_RISE):
         return None
     best = max(
         math.log(closes[j] / closes[j - 1])
@@ -318,12 +337,22 @@ def p5_week(closes: Sequence[float]) -> float | None:
 
 def momentum_percentile(value: float, population: Sequence[float]) -> float | None:
     """Posición de ``value`` dentro de ``population`` (que incluye a la propia moneda),
-    con la fórmula del apartado 5.1: ``(#menores + ½·(#iguales − 1)) / (n − 1)``."""
-    n = len(population)
+    con la fórmula del apartado 5.1: ``(#menores + ½·(#iguales − 1)) / (n − 1)``.
+
+    Si ``value`` no aparece en ``population``, se cuenta como un miembro más (así el
+    resultado sigue entre 0 y 1). Los valores no finitos no cuentan. ``None`` si no hay
+    con quién comparar o ``value`` no es un número finito."""
+    v = _finite(value)
+    if v is None:
+        return None
+    pop = [x for x in map(_finite, population) if x is not None]
+    lower = sum(1 for x in pop if x < v)
+    equal = sum(1 for x in pop if x == v)
+    n = len(pop)
+    if equal == 0:
+        equal, n = 1, n + 1
     if n < 2:
         return None
-    lower = sum(1 for x in population if x < value)
-    equal = sum(1 for x in population if x == value)
     return (lower + 0.5 * (equal - 1)) / (n - 1)
 
 
@@ -344,44 +373,64 @@ def breadth_text(share: float | None) -> str:
 
 
 def risk_reasons(
-    vol_daily: float,
-    episode_days: int,
-    median_qv: float | Decimal,
+    vol_daily: float | None,
+    episode_days: int | None,
+    median_qv: float | Decimal | None,
     best_day_share: float | None,
     spread_pct: float | Decimal | None = None,
 ) -> list[str]:
-    """Motivos que hacen que una moneda sea de riesgo Alto (vacía si no hay ninguno)."""
+    """Motivos que hacen que una moneda sea de riesgo Alto (vacía si no hay ninguno).
+
+    Lo dudoso se resuelve en contra: si falta σ, la antigüedad o el volumen (``None``, NaN
+    o infinito), eso ya es un motivo. ``spread_pct`` es ``None`` fuera de la prueba en vivo;
+    un ``best_day_share`` que falta significa que no hubo subida (no es motivo)."""
     reasons = []
-    if vol_daily > RISK_HIGH_VOL:
+    vol = _finite(vol_daily)
+    if vol is None:
+        reasons.append("sin datos de cuánto se mueve al día")
+    elif vol > RISK_HIGH_VOL:
         reasons.append(f"se mueve más de un {fmt_pct(RISK_HIGH_VOL, 0, sign=False)} al día")
-    if episode_days < RISK_MIN_EPISODE_DAYS:
+    age = _finite(episode_days)
+    if age is None:
+        reasons.append("sin datos de cuánto tiempo lleva cotizando")
+    elif age < RISK_MIN_EPISODE_DAYS:
         reasons.append(f"lleva menos de {RISK_MIN_EPISODE_DAYS} días cotizando")
-    if float(median_qv) < RISK_MIN_MEDIAN_QV:
+    qv = _finite(median_qv)
+    if qv is None:
+        reasons.append("sin datos de volumen")
+    elif qv < RISK_MIN_MEDIAN_QV:
         reasons.append(f"se negocian menos de {fmt_musd(RISK_MIN_MEDIAN_QV)} al día")
-    if best_day_share is not None and best_day_share > BEST_DAY_WARNING:
+    share = _finite(best_day_share)
+    if share is not None and share > BEST_DAY_WARNING:
         reasons.append(
             f"más del {fmt_pct(BEST_DAY_WARNING, 0, sign=False)} de la subida vino de un solo día"
         )
-    if spread_pct is not None and float(spread_pct) > RISK_MAX_SPREAD_PCT:
-        reasons.append(
-            f"diferencial entre compra y venta mayor del {fmt_num(RISK_MAX_SPREAD_PCT, 1)} %"
-        )
+    if spread_pct is not None:
+        spread = _finite(spread_pct)
+        if spread is None:
+            reasons.append("sin datos del diferencial entre compra y venta")
+        elif spread > RISK_MAX_SPREAD_PCT:
+            reasons.append(
+                f"diferencial entre compra y venta mayor del {fmt_num(RISK_MAX_SPREAD_PCT, 1)} %"
+            )
     return reasons
 
 
 def risk_level(
-    vol_daily: float,
-    episode_days: int,
-    median_qv: float | Decimal,
+    vol_daily: float | None,
+    episode_days: int | None,
+    median_qv: float | Decimal | None,
     best_day_share: float | None,
     spread_pct: float | Decimal | None = None,
 ) -> str:
     """Nivel de riesgo de la tabla 10.2. **Alto** si σ > 6 %, episodio < 180 días, volumen
     < 20 M$, peso del mejor día > 0,6 o (en vivo) diferencial > 0,2 %. **Bajo** si σ < 3 % y
-    no se cumple ninguna. **Medio** en el resto. ``spread_pct`` va en porcentaje."""
+    no se cumple ninguna. **Medio** en el resto. ``spread_pct`` va en porcentaje. Un dato
+    que falta cuenta como Alto (``risk_reasons``)."""
     if risk_reasons(vol_daily, episode_days, median_qv, best_day_share, spread_pct):
         return "Alto"
-    return "Bajo" if vol_daily < RISK_LOW_VOL else "Medio"
+    vol = _finite(vol_daily)
+    return "Bajo" if vol is not None and vol < RISK_LOW_VOL else "Medio"
 
 
 # =========================================================================================
@@ -479,7 +528,7 @@ def sell_reason(
         else:
             text = (
                 f"retirada de Binance: {gap_days} días seguidos sin cotizar; se cierra al "
-                f"último precio {fmt_pct(-haircut, 0)}"
+                f"último precio menos un {fmt_pct(haircut, 0, sign=False)}"
             )
     elif purpose == "fin_prueba":
         span = f" de {test_days} días" if test_days else ""
@@ -520,6 +569,7 @@ def _pct_words(x: float) -> str:
 
 
 def _beats_phrase(pct: float, rising: bool) -> str:
+    """«más que N de cada 100 monedas analizadas» (o «mejor que…» si no sube)."""
     if pct >= 1:
         return f"{'más' if rising else 'mejor'} que todas las demás monedas analizadas"
     if pct <= 0:
@@ -551,11 +601,15 @@ def sma_text(above_sma: Mapping[int, bool]) -> str:
 
 
 def bad_week_text(p5: float | None) -> str:
-    """Frase de la «semana mala» a partir del percentil 5 de las semanas del último año."""
+    """Frase de la «semana mala» a partir del percentil 5 de las semanas del último año.
+    ``None`` es lo que da ``p5_week`` con menos de 365 velas."""
     if p5 is None:
         return "Aún no se puede medir una semana mala: tiene menos de un año en Binance."
-    if p5 < 0:
-        return f"En el último año, 1 de cada 20 semanas cayó más de un {_pct_words(p5)}."
+    value = _finite(p5)
+    if value is None:
+        return "No se puede medir una semana mala: faltan datos."
+    if value < 0:
+        return f"En el último año, 1 de cada 20 semanas cayó más de un {_pct_words(value)}."
     return "En el último año, al menos 19 de cada 20 semanas terminaron sin pérdidas."
 
 
@@ -563,10 +617,11 @@ def single_day_warning(
     share: float | None, day: date | None = None, day_return: float | None = None
 ) -> str | None:
     """Aviso de «subida de un solo día» si el peso del mejor día pasa de 0,6."""
-    if share is None or share <= BEST_DAY_WARNING:
+    value = _finite(share)
+    if value is None or value <= BEST_DAY_WARNING:
         return None
     detail = ""
-    if day is not None and day_return is not None:
+    if day is not None and _finite(day_return) is not None:
         detail = f" ({fmt_date_short(day)}, {fmt_pct(day_return, 0)})"
     elif day is not None:
         detail = f" ({fmt_date_short(day)})"
@@ -602,14 +657,25 @@ def why_text(
     - ``median_qv``: mediana de volumen de 30 días; ``order_usd``: tamaño de una compra;
     - ``best_share``: ``best_day_share()``; ``p5``: ``p5_week()``;
     - ``best_day_info``: (día, rentabilidad) del mejor día, para el aviso.
+
+    Un dato que falta (``None``, NaN o infinito) se omite de la frase. Las frases del mejor
+    día solo salen si la moneda sube en 30 días (o no se sabe).
     """
+    ret_30d, momentum_pct = _finite(ret_30d), _finite(momentum_pct)
+    best_share = _finite(best_share)
     clauses = []
     if ret_30d is not None:
-        rising = ret_30d >= 0
-        verb = "sube" if rising else "baja"
-        clauses.append(f"{verb} un {_pct_words(ret_30d)} en 30 días")
+        if _pct_words(ret_30d) == fmt_pct(0, 1, sign=False):  # se leería «sube un 0,0 %»
+            rising = False
+            clauses.append("apenas cambia en 30 días")
+        else:
+            rising = ret_30d > 0
+            verb = "sube" if rising else "baja"
+            clauses.append(f"{verb} un {_pct_words(ret_30d)} en 30 días")
         if momentum_pct is not None:
             clauses.append(_beats_phrase(momentum_pct, rising))
+    if ret_30d is not None and ret_30d <= 0:
+        best_share = None  # sin subida no hay «mejor día» que repartir ni que avisar
     sma = sma_text(above_sma)
     if not clauses:
         first = sma
@@ -619,10 +685,11 @@ def why_text(
         first = f"{', '.join(clauses)}, y {sma}"
     sentences = [f"{name}: {first}."]
     if best_share is not None and best_share <= BEST_DAY_WARNING:
-        sentences.append(
-            f"La subida está repartida: su mejor día aportó el "
-            f"{fmt_pct(max(best_share, 0.0), 0, sign=False)}."
-        )
+        share_text = fmt_pct(max(best_share, 0.0), 0, sign=False)
+        if best_share <= BEST_DAY_SPREAD:
+            sentences.append(f"La subida está repartida: su mejor día aportó el {share_text}.")
+        else:  # entre la mitad y el umbral del aviso: no se dice que esté «repartida»
+            sentences.append(f"Su mejor día aportó el {share_text} de la subida.")
     sentences.append(liquidity_text(median_qv, order_usd))
     sentences.append(bad_week_text(p5))
     day, day_ret = best_day_info if best_day_info is not None else (None, None)
@@ -652,10 +719,11 @@ def confidence(
 
     Los colores son los del semáforo («verde», «ambar», «rojo», «gris»; vale también un
     ``Enum`` con ese ``value``). Lo dudoso se resuelve en contra: un exceso desconocido
-    cuenta como sin datos."""
-    if not backtest_exists or mean_excess is None:
+    (``None``, NaN o infinito) cuenta como sin datos."""
+    excess = _finite(mean_excess)
+    if not backtest_exists or excess is None:
         return "SIN DATOS"
-    if mean_excess <= 0:
+    if excess <= 0:
         return "MUY BAJA"
     if not _is_green(bt_color):
         return "BAJA"
@@ -666,6 +734,8 @@ def confidence(
 
 def confidence_text(level: str) -> str:
     """«Confianza en la regla: BAJA. En el pasado ganó a BTC de media, pero…»."""
+    if level not in CONFIDENCE_TEXT:
+        raise ValueError(f"nivel de confianza desconocido: {level!r}")
     return check_text(f"Confianza en la regla: {level}. {CONFIDENCE_TEXT[level]}")
 
 
@@ -674,14 +744,25 @@ def confidence_text(level: str) -> str:
 # =========================================================================================
 
 
+def _fold(text: str) -> str:
+    """Texto para buscar expresiones: minúsculas, sin tildes y con un solo espacio entre
+    palabras (así una tilde o un salto de línea no esconden una expresión prohibida)."""
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    plain = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return " ".join(plain.split())
+
+
 def check_text(text: str, *, allowed: Iterable[str] = ALLOWED_DISCLAIMERS) -> str:
     """Devuelve ``text`` si no contiene ninguna expresión prohibida (sin distinguir
-    mayúsculas); si la contiene, lanza ``ValueError``. Solo se admiten, completos, los
-    avisos fijos de ``allowed``."""
-    folded = text.casefold()
+    mayúsculas, tildes ni saltos de línea); si la contiene, lanza ``ValueError``. Solo se
+    admiten, completos, los avisos fijos de ``allowed``."""
+    folded = _fold(text)
     for phrase in allowed:
-        folded = folded.replace(phrase.casefold(), " ")
+        target = _fold(phrase)
+        if target:
+            folded = folded.replace(target, " ")
+    folded = " ".join(folded.split())
     for word in FORBIDDEN:
-        if word.casefold() in folded:
+        if _fold(word) in folded:
             raise ValueError(f"expresión prohibida «{word}» en el texto: {text!r}")
     return text

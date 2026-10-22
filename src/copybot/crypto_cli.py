@@ -5,6 +5,12 @@ copybot crypto costs calibrate | show      fotos del libro (bid/ask) y comparaci
 copybot crypto prereg check                el código coincide con el preregistro
 copybot crypto backtest [--until D] [--seed 7] [--null 1000] [--out F]
                                            backtest de la regla v1 (siempre se registra)
+copybot crypto analyze [--day D] [--out F] análisis de un día pasado (recalculado)
+copybot crypto today                       último informe diario guardado
+copybot crypto coin SÍMBOLO [--day D]      por qué una moneda está o no, y en qué puesto
+copybot crypto paper start [--days N] | status | pause | resume | stop
+copybot crypto daily                       una vez: descargar → analizar → cartera → informe
+copybot crypto run                         servicio: el paso diario a las 00:10 UTC
 """
 
 from __future__ import annotations
@@ -15,9 +21,11 @@ import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import select
+
 from copybot.backtest import stats
 from copybot.config import RiskLimits, Settings
-from copybot.crypto import btreport, semaforo
+from copybot.crypto import analysis, btreport, daily, paper, report, semaforo
 from copybot.crypto.backtest import deflated, evidence, run_backtest
 from copybot.crypto.binance import BinanceMarket
 from copybot.crypto.calibration import calibration_report, calibration_snapshot
@@ -31,13 +39,25 @@ from copybot.crypto.registry import (
 )
 from copybot.crypto.strategy import STRATEGY_V1, STRATEGY_VERSION, VARIANTS
 from copybot.crypto.sync import HISTORY_START, sync_all
-from copybot.db.models import CryptoBacktestRun
+from copybot.db.models import CryptoAnalysis, CryptoBacktestRun, CryptoPaperSnapshot
 from copybot.db.session import make_engine, make_sessionmaker
 
 
 def add_parsers(sub: argparse._SubParsersAction) -> None:
     crypto = sub.add_parser("crypto", help="bot de cripto en Binance (simulado)")
     csub = crypto.add_subparsers(dest="action", required=True)
+    an = csub.add_parser("analyze", help="análisis de un día pasado (sin red)")
+    an.add_argument("--day", type=date.fromisoformat, help="día (por defecto, ayer)")
+    an.add_argument("--out", help="guardar el informe en este fichero")
+    csub.add_parser("today", help="último informe diario guardado")
+    coin = csub.add_parser("coin", help="situación de una moneda")
+    coin.add_argument("symbol")
+    coin.add_argument("--day", type=date.fromisoformat)
+    paper = csub.add_parser("paper", help="cartera de prueba (simulada)")
+    paper.add_argument("paper_action", choices=["start", "status", "pause", "resume", "stop"])
+    paper.add_argument("--days", type=int, default=28, help="duración de la prueba")
+    csub.add_parser("daily", help="paso diario completo, una vez")
+    csub.add_parser("run", help="servicio: paso diario a las 00:10 UTC")
     pre = csub.add_parser("prereg", help="comprobar el preregistro de la regla")
     pre.add_argument("prereg_action", choices=["check"])
     bt = csub.add_parser("backtest", help="backtest de la regla v1 (se registra siempre)")
@@ -72,6 +92,19 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
             return 0 if not problems else 1
         if args.action == "backtest":
             return await _backtest(args, sessions)
+        if args.action in ("analyze", "coin"):
+            return await _analyze(args, sessions)
+        if args.action == "today":
+            return await _today(sessions)
+        if args.action == "paper":
+            return await _paper(args, sessions)
+        if args.action == "daily":
+            result = await daily.run_daily(sessions, say=_say)
+            print(result.text)
+            return 0
+        if args.action == "run":
+            await daily.run_forever(sessions, say=_say)
+            return 0
     finally:
         await engine.dispose()
     return 2
@@ -178,12 +211,121 @@ async def _backtest(args: argparse.Namespace, sessions) -> int:
         commit=code_commit(),
         semaforo_md=btreport.semaforo_section(sem),
     )
+    periods = [
+        (
+            name,
+            p["regla"]["anual"],
+            p["btc"]["anual"],
+            p["btc_filtro"]["anual"],
+            p["cesta10"]["anual"],
+        )
+        for name, p in r.subperiods.items()
+        if name in ("inicio-2020", "2021-2022", "2023-hoy")
+    ]
     async with sessions.begin() as s:
         row = await s.get(CryptoBacktestRun, principal_id)
         if row is not None:
             row.report_md = text
+            row.metrics = {
+                **row.metrics,
+                "margen": [ex.ci_low, ex.ci_high],
+                "nulo_percentil": r.null_percentile,
+                "luz": sem.luces.backtest,
+                "periodos": periods,
+                "dsr": dsr,
+                "k": k,
+            }
     if args.out:
         await asyncio.to_thread(Path(args.out).write_text, text, encoding="utf-8")
         say(f"Informe guardado en {args.out}")
     print(text)
+    return 0
+
+
+def _say(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+async def _analyze(args: argparse.Namespace, sessions) -> int:
+    day = args.day or (datetime.now(UTC).date() - timedelta(days=1))
+    panel = await load_panel(sessions, start=day - timedelta(days=daily.HISTORY_DAYS), end=day)
+    a = analysis.analyze(panel, day)
+    if args.action == "coin":
+        print(report.coin_text(a, args.symbol.upper()))
+        return 0
+    await analysis.store(sessions, a, live=False, commit=code_commit())
+    text = report.render(a, generated_at=datetime.now(UTC))
+    if args.out:
+        await asyncio.to_thread(Path(args.out).write_text, text, encoding="utf-8")
+    print(text)
+    return 0
+
+
+async def _today(sessions) -> int:
+    async with sessions() as s:
+        row = await s.scalar(
+            select(CryptoAnalysis)
+            .where(CryptoAnalysis.report_md.is_not(None))
+            .order_by(CryptoAnalysis.day.desc())
+            .limit(1)
+        )
+    if row is None:
+        print("Aún no hay ningún informe diario: ejecuta «copybot crypto daily».")
+        return 1
+    print(row.report_md)
+    return 0
+
+
+async def _paper(args: argparse.Namespace, sessions) -> int:
+    runs = await paper.active_runs(sessions)
+    test = next((r for r in runs if r.kind == "prueba"), None)
+    if args.paper_action == "start":
+        if prereg_check():
+            print("No se puede empezar: la regla aún no está preregistrada.", file=sys.stderr)
+            return 1
+        day = datetime.now(UTC).date() - timedelta(days=1)
+        run_id = await paper.start_run(
+            sessions,
+            kind="prueba",
+            start_day=day,
+            limits=RiskLimits.model_construct(),
+            days=args.days,
+        )
+        print(
+            f"Prueba n.º {run_id} de {args.days} días con 100 $ ficticios. Empieza en el "
+            "próximo paso diario."
+            + (
+                " Con menos de 28 días el semáforo no puede pasar de gris."
+                if args.days < 28
+                else ""
+            )
+        )
+        return 0
+    if args.paper_action == "status":
+        if not runs:
+            print("No hay ninguna cartera de prueba activa.")
+        async with sessions() as s:
+            for r in runs:
+                snap = await s.scalar(
+                    select(CryptoPaperSnapshot)
+                    .where(
+                        CryptoPaperSnapshot.run_id == r.id, CryptoPaperSnapshot.book == "portfolio"
+                    )
+                    .order_by(CryptoPaperSnapshot.day.desc())
+                    .limit(1)
+                )
+                value = "sin pasos todavía" if snap is None else f"{snap.equity_usd:.2f} $"
+                print(f"n.º {r.id} ({r.kind}) desde {r.start_day}: {r.status}; valor {value}")
+        return 0
+    target = test or next((r for r in runs if r.kind == "continua"), None)
+    if target is None:
+        print("No hay ninguna cartera activa.")
+        return 1
+    if args.paper_action == "pause":
+        await paper.set_status(sessions, target.id, "PAUSED", "pausada a mano")
+    elif args.paper_action == "resume":
+        await paper.set_status(sessions, target.id, "RUNNING", "reanudada a mano")
+    else:
+        await paper.set_status(sessions, target.id, "STOPPED", "parada a mano")
+    print(f"Cartera n.º {target.id}: {args.paper_action} hecho.")
     return 0

@@ -34,6 +34,8 @@ class UniverseParams:
     max_jump: float = 4.0  # un cierre ×4 o ÷4 del anterior: redenominación o error
     min_daily_vol: float = 0.005  # por debajo: moneda anclada (estable)
     vol_days: int = 60
+    # Solo para pruebas de estrés (sin las monedas que más aportaron, solo supervivientes).
+    exclude: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,9 @@ def universe(panel: Panel, day: date, p: UniverseParams | None = None) -> Univer
         i = series.at(day)
         if i is None or not series.traded(i):
             continue  # no cotizaba ese día (aún no listada, ya retirada o sin negociación)
+        if series.symbol in p.exclude:
+            excluded[series.symbol] = "excluida en esta prueba de estrés"
+            continue
         if series.base in STABLE_BASES:
             excluded[series.symbol] = "moneda estable o divisa"
             continue

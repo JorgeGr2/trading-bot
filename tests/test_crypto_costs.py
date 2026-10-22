@@ -35,8 +35,8 @@ M = 1_000_000
 @pytest.mark.parametrize(
     ("median_qv", "expected"),
     [
-        (5_000 * M, 0.0002),
-        (200 * M, 0.0002),  # el límite pertenece al tramo de arriba
+        (5_000 * M, 0.0003),
+        (200 * M, 0.0003),  # el límite pertenece al tramo de arriba
         (200 * M - 1, 0.0004),
         (50 * M, 0.0004),
         (49.9 * M, 0.0008),
@@ -55,12 +55,12 @@ def test_cost_tiers(median_qv, expected):
 
 def test_round_trip_matches_the_table_and_stress_multiplies():
     assert [round(round_trip_cost(v), 10) for v, _ in COST_TIERS] == [
-        0.0024,
+        0.0026,
         0.0028,
         0.0036,
         0.0050,
     ]
-    assert cost_per_side(300 * M, 2) == pytest.approx(0.0004)
+    assert cost_per_side(300 * M, 2) == pytest.approx(0.0006)
     assert cost_per_side(7 * M, 3) == pytest.approx(0.0045)
     assert round_trip_cost(300 * M, 2) == pytest.approx(2 * round_trip_cost(300 * M))
     with pytest.raises(ValueError):
@@ -71,10 +71,10 @@ def test_round_trip_matches_the_table_and_stress_multiplies():
 
 def test_cost_table_hash_is_frozen():
     """Cambiar la tabla exige cambiar este test (y la huella del preregistro)."""
-    expected = "b18ea8e3402626614d9279b988588fa5dbf41a6f0d77e2e85aad5910588ba4b4"
+    expected = "2c9ee6e81e6a843e090c018b4ae5790a38e525ba85cd1dd8a43fb55c2b5d557f"
     assert cost_table_hash() == expected
     assert cost_table_hash(list(COST_TIERS), FEE) == expected
-    raised = ((200_000_000.0, 0.0003), *COST_TIERS[1:])
+    raised = ((200_000_000.0, 0.0004), *COST_TIERS[1:])
     assert cost_table_hash(raised) != expected
     assert cost_table_hash(fee=0.00075) != expected
 
@@ -84,11 +84,11 @@ def test_cost_table_hash_is_frozen():
 
 def test_backtest_round_trip_is_exact():
     qty = buy_qty(18.0, 2.0, 300 * M)
-    assert qty == pytest.approx(18.0 / (2.0 * 1.0002 * 1.001), rel=1e-15)
+    assert qty == pytest.approx(18.0 / (2.0 * 1.0003 * 1.001), rel=1e-15)
     cash = sell_usd(qty, 2.0, 300 * M)
-    assert cash == pytest.approx(18.0 * (0.9998 * 0.999) / (1.0002 * 1.001), rel=1e-15)
-    # Sin cambio de precio se pierde ≈ 2·(f + c) = 0,24 %.
-    assert 1 - cash / 18.0 == pytest.approx(0.0024, abs=1e-5)
+    assert cash == pytest.approx(18.0 * (0.9997 * 0.999) / (1.0003 * 1.001), rel=1e-15)
+    # Sin cambio de precio se pierde ≈ 2·(f + c) = 0,26 %.
+    assert 1 - cash / 18.0 == pytest.approx(0.0026, abs=1e-5)
     # Con subida: la misma cuenta escalada por el precio de salida.
     up = sell_usd(buy_qty(18.0, 2.0, 7 * M), 3.0, 7 * M)
     assert up == pytest.approx(18.0 * 1.5 * (0.9985 * 0.999) / (1.0015 * 1.001), rel=1e-15)
@@ -96,9 +96,9 @@ def test_backtest_round_trip_is_exact():
 
 def test_stress_multiplies_spread_and_fee():
     qty = buy_qty(100.0, 10.0, 300 * M, mult=2)
-    assert qty == pytest.approx(100.0 / (10.0 * 1.0004 * 1.002), rel=1e-15)
+    assert qty == pytest.approx(100.0 / (10.0 * 1.0006 * 1.002), rel=1e-15)
     cash = sell_usd(qty, 10.0, 300 * M, mult=2)
-    assert cash == pytest.approx(qty * 10.0 * 0.9996 * 0.998, rel=1e-15)
+    assert cash == pytest.approx(qty * 10.0 * 0.9994 * 0.998, rel=1e-15)
     loss_1 = 1 - sell_usd(buy_qty(100.0, 10.0, 7 * M), 10.0, 7 * M) / 100
     loss_2 = 1 - sell_usd(buy_qty(100.0, 10.0, 7 * M, 2), 10.0, 7 * M, 2) / 100
     assert loss_2 == pytest.approx(2 * loss_1, rel=0.01)

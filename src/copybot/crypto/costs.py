@@ -28,7 +28,9 @@ FEE = 0.001  # comisión por lado: 0,10 % (taker, sin descuento con BNB)
 # (mediana mínima de volumen de 30 días en USDT, c por lado), de más a menos líquido.
 # Por debajo del último límite (5 M$) se aplica el último tramo, el más caro.
 COST_TIERS: tuple[tuple[float, float], ...] = (
-    (200_000_000.0, 0.0002),  # ≥ 200 M$: 0,02 %
+    # ≥ 200 M$: 0,03 % (subido del 0,02 % del diseño: la calibración del 22-oct-2026 midió
+    # un 0,025 % con el percentil 75 más el colchón).
+    (200_000_000.0, 0.0003),
     (50_000_000.0, 0.0004),  # 50-200 M$: 0,04 %
     (10_000_000.0, 0.0008),  # 10-50 M$: 0,08 %
     (5_000_000.0, 0.0015),  # 5-10 M$: 0,15 %

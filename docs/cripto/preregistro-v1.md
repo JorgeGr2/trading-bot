@@ -47,10 +47,15 @@ K registrado = 3 (la regla y las 2 variantes). Cualquier prueba ad hoc sube K y 
 Comisión del 0,10 % por lado (*taker*, sin descuento con BNB) más el medio diferencial y el
 deslizamiento según la mediana de volumen de 30 días:
 
-COSTES_TABLA
+| Mediana de 30 días | Coste por lado | Ida y vuelta (2·(0,10 % + c)) |
+|---|---|---|
+| ≥ 200 M$ | 0,03 % | 0,26 % |
+| 50-200 M$ | 0,04 % | 0,28 % |
+| 10-50 M$ | 0,08 % | 0,36 % |
+| 5-10 M$ (y por debajo) | 0,15 % | 0,50 % |
 
 Calibración con fotos del libro (`copybot crypto costs show`) tomadas el 22-oct-2026 antes de
-este registro: CALIBRACION_RESUMEN
+este registro: 4 fotos (10:01, 10:11, 10:21 y 10:31 UTC, unas 2.000 observaciones). Medido (percentil 75 del medio diferencial más un colchón del 0,02 %): ≥ 200 M$ 0,025 %; 50-200 M$ 0,026 %; 10-50 M$ 0,045 %; 5-10 M$ 0,043 %. El tramo más líquido superaba la tabla del diseño (0,02 %) y se subió al 0,03 %; los demás tramos quedan por encima de lo medido. Libro fino (< 25 $ al mejor precio): 2 % de las fotos de 10-50 M$ y 9 % de las de 5-10 M$. Limitación: todas las fotos son de una misma mañana; cada mes se repetirá la calibración solo para vigilar la deriva.
 
 Pruebas de estrés fijadas: costes ×2 (obligatoria) y ×3, ejecución con un día de retraso, sin
 las 3 monedas que más aportaron, solo supervivientes, retiradas al 0 % y al 100 %.
@@ -71,4 +76,7 @@ las 3 monedas que más aportaron, solo supervivientes, retiradas al 0 % y al 100
 
 ## 5. Huellas (las comprueba `copybot crypto prereg check`)
 
-HUELLAS
+- Huella regla: `44caa3a5252aef701d4d3d9106f084de3b64d0a25a51882b9da7bf310fc8cf39`
+- Huella costes: `2c9ee6e81e6a843e090c018b4ae5790a38e525ba85cd1dd8a43fb55c2b5d557f`
+- Huella variante V1: `5944c4b01b0dfc91026ee2749f378876be0a59e28c5812c0521a8709839a8f68`
+- Huella variante V2: `fc3757f4353cfa241ab134334e975797bd8e67a6df4870a4aa9f849b18f01425`

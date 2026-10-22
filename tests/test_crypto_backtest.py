@@ -50,3 +50,21 @@ def test_full_protocol_runs_and_is_reproducible():
     # Más costes nunca mejoran el resultado.
     assert a.stress["costes_x2"].final <= a.curve_a.final
     assert statistics.fmean(a.universe_sizes.values()) >= 20
+
+
+def test_report_and_semaforo_render_without_promises():
+    from copybot.crypto import btreport, semaforo
+    from copybot.crypto.backtest import evidence
+    from copybot.crypto.explain import check_text
+
+    panel = make_panel(n=24, days=330, seed=5)
+    r = run_backtest(panel, end=panel.days[-10], limits=LIMITS, null_seeds=3)
+    sem = semaforo.evaluate(
+        evidence(r, dsr=0.5, prereg_ok=True), None, version="cripto-v1:x", huella="h"
+    )
+    assert sem.luces.backtest == "gris"  # menos de 3 años de datos
+    text = btreport.render(
+        r, k=3, dsr=0.5, min_trl=None, commit=None, semaforo_md=btreport.semaforo_section(sem)
+    )
+    check_text(text)
+    assert "Backtest de la regla cripto-v1" in text and "Semáforo" in text

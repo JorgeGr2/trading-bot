@@ -520,3 +520,37 @@ def deflated(result: BacktestResult, k: int) -> float | None:
 
 def pairwise_days(days: list[date]) -> list[tuple[date, date]]:
     return list(itertools.pairwise(days))
+
+
+def evidence(result: BacktestResult, *, dsr: float | None, prereg_ok: bool, panel_gaps=()):
+    """Lo que necesita la luz del backtest del semáforo (``semaforo.BacktestEvidence``)."""
+    from copybot.crypto.semaforo import BacktestEvidence
+
+    n = max(len(result.days), 1)
+    small = sum(1 for d in result.days if result.universe_sizes.get(d, 0) < MIN_UNIVERSE)
+    gaps = sum(1 for d in result.days if d in set(panel_gaps))
+    sub = result.subperiods
+    sig = result.signals_excess
+    a = result.curve_a
+    return BacktestEvidence(
+        years_evaluable=len(result.days) / 365,
+        share_days_small_universe=small / n,
+        coverage=1 - gaps / n,
+        delisted_pairs_in_universe=result.survival["ya_no_cotizan"],
+        prereg_hash_ok=prereg_ok,
+        excess_annual=result.excess_a.annual,
+        excess_annual_costs_x2=result.excess_stress["costes_x2"].annual,
+        excess_annual_delay_1d=result.excess_stress["un_dia_tarde"].annual,
+        excess_without_top3=result.excess_stress["sin_top3"].annual,
+        excess_first_half=sub.get("primera mitad", {}).get("exceso"),
+        excess_second_half=sub.get("segunda mitad", {}).get("exceso"),
+        excess_2023_on=sub.get("2023-hoy", {}).get("exceso"),
+        ci_low_by_block={int(k): lo for k, (lo, _) in result.excess_a.ci_by_block.items()},
+        dsr=dsr,
+        null_percentile=result.null_percentile if result.null_finals else None,
+        signals_book_mean_excess=sig.get("exceso_medio"),
+        signals_book_ci_low=sig["ic"][28][0] if "ic" in sig else None,
+        max_drawdown=curve_metrics(a.curve, a.worst)["caida_maxima"],
+        archive_imported=False,
+        btc_filter_beats_strategy=result.benchmarks["btc_filtro"].final > a.final,
+    )

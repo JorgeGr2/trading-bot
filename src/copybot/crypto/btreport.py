@@ -332,3 +332,26 @@ def _survival(r: BacktestResult) -> list[str]:
 
 def generated_on(day: date) -> str:
     return f"Generado el {day:%d-%m-%Y}."
+
+
+COLORS = {"verde": "VERDE", "ambar": "ÁMBAR", "rojo": "ROJO", "gris": "GRIS"}
+
+
+def semaforo_section(sem) -> str:
+    """Luz del backtest con sus criterios (la luz en vivo sale en el informe diario)."""
+    lines = [
+        f"## Semáforo «¿Es rentable?»: {COLORS.get(sem.semaforo, sem.semaforo)}",
+        "",
+        f"- Backtest: **{COLORS.get(sem.luces.backtest, sem.luces.backtest)}** · En vivo: "
+        f"{COLORS.get(sem.luces.en_vivo, sem.luces.en_vivo)}.",
+        "",
+        "| Criterio | Qué mide | Valor | Hace falta | ¿Cumple? |",
+        "|---|---|---|---|---|",
+    ]
+    for c in sem.criterios:
+        ok = "sí" if c.cumple else "no"
+        lines.append(f"| {c.id} | {c.texto} | {c.valor} | {c.umbral} | {ok} |")
+    lines.append("")
+    lines += [f"- {m}" for m in sem.mensajes]
+    lines.append(f"- {sem.aviso}")
+    return "\n".join(lines)

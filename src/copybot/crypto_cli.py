@@ -17,8 +17,8 @@ from pathlib import Path
 
 from copybot.backtest import stats
 from copybot.config import RiskLimits, Settings
-from copybot.crypto import btreport
-from copybot.crypto.backtest import deflated, run_backtest
+from copybot.crypto import btreport, semaforo
+from copybot.crypto.backtest import deflated, evidence, run_backtest
 from copybot.crypto.binance import BinanceMarket
 from copybot.crypto.calibration import calibration_report, calibration_snapshot
 from copybot.crypto.panel import load_panel
@@ -29,7 +29,7 @@ from copybot.crypto.registry import (
     prereg_check,
     record_run,
 )
-from copybot.crypto.strategy import STRATEGY_V1, VARIANTS
+from copybot.crypto.strategy import STRATEGY_V1, STRATEGY_VERSION, VARIANTS
 from copybot.crypto.sync import HISTORY_START, sync_all
 from copybot.db.models import CryptoBacktestRun
 from copybot.db.session import make_engine, make_sessionmaker
@@ -164,7 +164,20 @@ async def _backtest(args: argparse.Namespace, sessions) -> int:
         if ex.sr_daily and ex.sr_daily > 0 and ex.skew is not None and ex.kurt is not None
         else None
     )
-    text = btreport.render(r, k=k, dsr=dsr, min_trl=trl, commit=code_commit())
+    sem = semaforo.evaluate(
+        evidence(r, dsr=dsr, prereg_ok=not prereg_check(), panel_gaps=panel.global_gaps()),
+        None,
+        version=f"{STRATEGY_VERSION}:{STRATEGY_V1.params_hash()[:12]}",
+        huella=r.data_hash[:16],
+    )
+    text = btreport.render(
+        r,
+        k=k,
+        dsr=dsr,
+        min_trl=trl,
+        commit=code_commit(),
+        semaforo_md=btreport.semaforo_section(sem),
+    )
     async with sessions.begin() as s:
         row = await s.get(CryptoBacktestRun, principal_id)
         if row is not None:

@@ -152,10 +152,11 @@ def test_random_books_never_break_the_caps():
         remaining = len(holdings) - len(d.sells)
         assert remaining + len(d.buys) <= min(STRATEGY_V1.n_positions, LIMITS.max_open_positions)
         spent = sum(o.usd for o in d.buys)
-        assert spent <= cash + 1e-9
+        proceeds = sum(holdings[o.symbol].qty * 10.0 * (1 - 0.005) for o in d.sells)
+        assert spent <= cash + proceeds + 1e-9
         assert all(o.usd <= float(LIMITS.max_position_usd) for o in d.buys)
         if d.buys:
-            assert cash - spent >= 10 - 1e-9  # la reserva del 10 % del capital
+            assert cash + proceeds - spent >= 10 - 1e-9  # la reserva del 10 % del capital
 
 
 def test_params_are_frozen():

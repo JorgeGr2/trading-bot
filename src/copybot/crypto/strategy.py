@@ -26,6 +26,7 @@ from copybot.sim.risk import BookState, entry_rejections, halt_reasons
 
 STRATEGY_VERSION = "cripto-v1"
 MIN_ORDER_USD = 5.0
+SELL_COST_ESTIMATE = 0.005  # para contar el efectivo de las ventas del mismo día
 
 
 @dataclass(frozen=True)
@@ -258,7 +259,11 @@ def decide(
         size = size_usd(equity, p, limits, mode)
         n = min(p.n_positions, limits.max_open_positions)
         holes = n - (len(book.holdings) - len(sold))
-        cash = book.cash
+        # Las ventas se ejecutan antes que las compras: su importe (estimado con el cierre
+        # y un coste prudente) ya cuenta como efectivo para comprar.
+        cash = book.cash + sum(
+            book.holdings[s].qty * view.close[s] * (1 - SELL_COST_ESTIMATE) for s in sold
+        )
         open_now = len(book.holdings) - len(sold)
         for sig in view.ranked:
             if holes <= 0 or sig.rank > p.entry_rank:

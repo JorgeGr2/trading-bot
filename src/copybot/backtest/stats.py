@@ -99,6 +99,14 @@ _NORMAL = statistics.NormalDist()  # Φ y Φ⁻¹ de la normal estándar
 Statistic = Callable[[Sequence[float]], float]
 
 
+def _finite_floats(values: Sequence[float], what: str) -> list[float]:
+    """Los valores como ``float``; un NaN o un infinito es un error de datos, no se arrastra."""
+    data = [float(v) for v in values]
+    if not all(math.isfinite(v) for v in data):
+        raise ValueError(f"{what}: hay valores no finitos (NaN o infinito)")
+    return data
+
+
 def log_excess(
     strategy_daily_returns: Sequence[float], benchmark_daily_returns: Sequence[float]
 ) -> list[float]:
@@ -110,11 +118,13 @@ def log_excess(
     """
     if len(strategy_daily_returns) != len(benchmark_daily_returns):
         raise ValueError("las dos series de rentabilidades deben cubrir los mismos días")
+    strategy = _finite_floats(strategy_daily_returns, "rentabilidades de la estrategia")
+    benchmark = _finite_floats(benchmark_daily_returns, "rentabilidades de la referencia")
     excess = []
-    for r_a, r_b in zip(strategy_daily_returns, benchmark_daily_returns, strict=True):
+    for r_a, r_b in zip(strategy, benchmark, strict=True):
         if r_a <= -1 or r_b <= -1:
             raise ValueError("una rentabilidad diaria de −100 % o peor no tiene logaritmo")
-        excess.append(math.log1p(float(r_a)) - math.log1p(float(r_b)))
+        excess.append(math.log1p(r_a) - math.log1p(r_b))
     return excess
 
 
@@ -122,7 +132,10 @@ def annualized_excess(excess: Sequence[float]) -> float:
     """Exceso anual frente a la referencia, ``exp(365·ē) − 1`` (0,09 = +9 % al año).
 
     ``excess`` son los excesos diarios logarítmicos de :func:`log_excess` (al menos uno).
+    Equivale a ``(V_A / V_B)^(365/T) − 1``: el cociente final llevado a un año.
     """
+    if len(excess) == 0:
+        raise ValueError("serie de excesos vacía: hace falta al menos un día")
     return math.expm1(DAYS_PER_YEAR * statistics.fmean(excess))
 
 
@@ -139,7 +152,10 @@ def sharpe_ratio(values: Sequence[float]) -> float | None:
     """
     if _is_degenerate(values):
         return None
-    return statistics.fmean(values) / statistics.stdev(values)
+    sd = statistics.stdev(values)
+    if sd == 0:  # diferencias tan pequeñas que la varianza se queda en 0 al redondear
+        return None
+    return statistics.fmean(values) / sd
 
 
 def information_ratio(excess: Sequence[float]) -> float | None:
@@ -151,17 +167,26 @@ def information_ratio(excess: Sequence[float]) -> float | None:
     return None if sr is None else sr * math.sqrt(DAYS_PER_YEAR)
 
 
-def _central_moments(values: Sequence[float]) -> tuple[float, float, float] | None:
-    """Momentos centrales muestrales m₂, m₃ y m₄ (divididos entre n)."""
+def _standard_moments(values: Sequence[float]) -> tuple[float, float] | None:
+    """Momentos estandarizados 3.º y 4.º, ``m₃ / m₂^1,5`` y ``m₄ / m₂²`` (mₖ divididos entre n).
+
+    No dependen de la escala, así que las desviaciones se dividen primero entre la mayor:
+    una dispersión diminuta no se queda en 0 al elevarla al cuadrado, al cubo o a la cuarta.
+    ``None`` si no hay dispersión que medir.
+    """
     if _is_degenerate(values):
         return None
     n = len(values)
     mean = statistics.fmean(values)
     deviations = [v - mean for v in values]
-    m2 = math.fsum(d * d for d in deviations) / n
-    m3 = math.fsum(d * d * d for d in deviations) / n
-    m4 = math.fsum(d * d * d * d for d in deviations) / n
-    return m2, m3, m4
+    largest = max(abs(d) for d in deviations)
+    if largest == 0:  # diferencias tan pequeñas que se pierden al restar la media
+        return None
+    us = [d / largest for d in deviations]
+    m2 = math.fsum(u * u for u in us) / n
+    m3 = math.fsum(u * u * u for u in us) / n
+    m4 = math.fsum(u * u * u * u for u in us) / n
+    return m3 / m2**1.5, m4 / (m2 * m2)
 
 
 def skewness(values: Sequence[float]) -> float | None:
@@ -169,11 +194,8 @@ def skewness(values: Sequence[float]) -> float | None:
 
     ``None`` si hay menos de 2 valores o todos son iguales.
     """
-    moments = _central_moments(values)
-    if moments is None:
-        return None
-    m2, m3, _ = moments
-    return m3 / m2**1.5
+    moments = _standard_moments(values)
+    return None if moments is None else moments[0]
 
 
 def kurtosis(values: Sequence[float]) -> float | None:
@@ -181,11 +203,8 @@ def kurtosis(values: Sequence[float]) -> float | None:
 
     ``None`` si hay menos de 2 valores o todos son iguales.
     """
-    moments = _central_moments(values)
-    if moments is None:
-        return None
-    m2, _, m4 = moments
-    return m4 / (m2 * m2)
+    moments = _standard_moments(values)
+    return None if moments is None else moments[1]
 
 
 def _check_resampling(resamples: int, alpha: float | None = None) -> None:
@@ -225,11 +244,11 @@ def stationary_bootstrap(
     Devuelve los ``resamples`` valores del estadístico **ordenados** de menor a mayor. Con la
     misma semilla, el mismo resultado.
     """
-    data = [float(v) for v in values]
+    data = _finite_floats(values, "serie que remuestrear")
     t = len(data)
     if t == 0:
         raise ValueError("serie vacía: no hay nada que remuestrear")
-    if block < 1:
+    if not block >= 1:  # también rechaza NaN
         raise ValueError("la longitud media de bloque L debe ser ≥ 1")
     _check_resampling(resamples)
     jump = 1.0 / block
@@ -313,7 +332,9 @@ def cluster_bootstrap(
     junta sus valores y calcula el estadístico. Los grupos vacíos no cuentan. Devuelve los
     valores del estadístico ordenados de menor a mayor.
     """
-    clusters = [[float(v) for v in group] for group in groups if len(group) > 0]
+    clusters = [
+        _finite_floats(group, "grupo que remuestrear") for group in groups if len(group) > 0
+    ]
     if not clusters:
         raise ValueError("no hay ningún grupo con datos que remuestrear")
     _check_resampling(resamples)
@@ -382,7 +403,7 @@ def sr0(k: int, variance: float) -> float:
     """
     if k < 1:
         raise ValueError("K debe ser al menos 1")
-    if variance < 0:
+    if not variance >= 0:  # también rechaza NaN
         raise ValueError("la varianza no puede ser negativa")
     if k == 1:
         return 0.0
@@ -399,6 +420,8 @@ def deflated_sharpe(sr: float, n: int, skew: float, kurt: float, k: int, varianc
     se aplica el suelo conservador ``V = max(variance, 1/n)``. Con K = 1 es ``PSR(0)``.
     """
     _check_observations(n)
+    if not variance >= 0:  # el suelo no debe tapar una varianza imposible (o NaN)
+        raise ValueError("la varianza no puede ser negativa")
     return psr(sr, sr0(k, max(variance, 1 / n)), n, skew, kurt)
 
 
@@ -437,9 +460,11 @@ def spearman(x: Sequence[float], y: Sequence[float]) -> float | None:
     """
     if len(x) != len(y):
         raise ValueError("las dos series deben tener la misma longitud")
-    if len(x) < 2:
+    # Con un NaN el orden no está definido y los rangos saldrían mal sin avisar.
+    xs, ys = _finite_floats(x, "primera serie"), _finite_floats(y, "segunda serie")
+    if len(xs) < 2:
         return None
-    rx, ry = _average_ranks(x), _average_ranks(y)
+    rx, ry = _average_ranks(xs), _average_ranks(ys)
     if _is_degenerate(rx) or _is_degenerate(ry):
         return None
     return statistics.correlation(rx, ry)

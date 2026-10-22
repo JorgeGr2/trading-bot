@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import itertools
 import math
 import random
@@ -10,6 +11,8 @@ import statistics
 import pytest
 
 from copybot.backtest.stats import (
+    DAYS_PER_YEAR,
+    EULER_GAMMA,
     annualized_excess,
     cluster_bootstrap,
     cluster_bootstrap_ci,
@@ -270,3 +273,112 @@ def test_spearman_degenerate_cases():
     assert spearman([1.0], [2.0]) is None
     with pytest.raises(ValueError, match="longitud"):
         spearman([1.0, 2.0], [1.0])
+
+
+# --- Valores del diseño y casos límite ----------------------------------------------------
+
+
+def test_defaults_are_the_registered_ones():
+    # B = 5.000, semilla 7, L ∈ {7, 28, 56}, percentiles 2,5-97,5 (apartado 8.5).
+    for fn in (stationary_bootstrap_ci, stationary_bootstrap_ci_by_block):
+        params = inspect.signature(fn).parameters
+        assert tuple(params["blocks"].default) == (7, 28, 56)
+        assert params["resamples"].default == 5000
+        assert params["seed"].default == 7
+        assert params["alpha"].default == 0.05
+        assert params["statistic"].default is statistics.fmean
+    params = inspect.signature(cluster_bootstrap_ci).parameters
+    assert (params["resamples"].default, params["seed"].default) == (5000, 7)
+    assert params["alpha"].default == 0.05
+    assert EULER_GAMMA == 0.5772 and DAYS_PER_YEAR == 365
+    # Con B = 5.000, los percentiles 2,5 y 97,5 son los puestos 125 y 4.874 (desde 0).
+    values = _autocorrelated(40, seed=9)
+    stats = stationary_bootstrap(values, statistics.fmean, block=7)
+    assert len(stats) == 5000
+    assert stationary_bootstrap_ci_by_block(values)[7] == (stats[125], stats[4874])
+
+
+def test_annualized_excess_is_the_final_ratio_taken_to_one_year():
+    rng = random.Random(4)  # noqa: S311
+    r_a = [rng.uniform(-0.05, 0.06) for _ in range(730)]
+    r_btc = [rng.uniform(-0.05, 0.05) for _ in range(730)]
+    ratio = math.prod(1 + a for a in r_a) / math.prod(1 + b for b in r_btc)
+    expected = ratio ** (365 / 730) - 1  # dos años: raíz cuadrada del cociente final
+    assert annualized_excess(log_excess(r_a, r_btc)) == pytest.approx(expected, rel=1e-9)
+    with pytest.raises(ValueError, match="vacía"):
+        annualized_excess([])
+
+
+def test_psr_and_dsr_by_hand_with_skew_and_fat_tails():
+    # SR̂ = 0,1; SR* = 0,02; T = 251; γ₃ = −0,5; γ₄ = 5: denominador 1 + 0,05 + 0,01 = 1,06.
+    z = 0.08 * math.sqrt(250) / math.sqrt(1.06)
+    assert psr(0.1, 0.02, 251, -0.5, 5.0) == pytest.approx(PHI.cdf(z), abs=1e-12)
+    # DSR con K = 3 y varianza por debajo del suelo: V = 1/T = 0,001.
+    sr_0 = math.sqrt(0.001) * (
+        (1 - 0.5772) * PHI.inv_cdf(1 - 1 / 3) + 0.5772 * PHI.inv_cdf(1 - 1 / (3 * math.e))
+    )
+    z = (0.1 - sr_0) * math.sqrt(999) / math.sqrt(1 + (3 - 1) / 4 * 0.01)
+    assert deflated_sharpe(0.1, 1000, 0.0, 3.0, 3, 0.0) == pytest.approx(PHI.cdf(z), abs=1e-12)
+    # Deflactar puede cambiar el veredicto: PSR(0) ≥ 0,95 pero DSR con K = 8 < 0,95.
+    assert psr(0.06, 0.0, 1000, 0.0, 3.0) >= 0.95
+    assert deflated_sharpe(0.06, 1000, 0.0, 3.0, 8, 0.0) < 0.95
+
+
+def test_live_review_interval_uses_bonferroni_over_13_reviews():
+    # α unilateral 0,025/13 → z = 2,89; intervalo bilateral al 99,6 % con B = 10.000.
+    alpha_one_sided = 0.025 / 13
+    assert PHI.inv_cdf(1 - alpha_one_sided) == pytest.approx(2.89, abs=5e-3)
+    values = _autocorrelated(30, seed=6)
+    by_block = stationary_bootstrap_ci_by_block(
+        values, blocks=(7, 14), resamples=10_000, alpha=2 * alpha_one_sided
+    )
+    stats = stationary_bootstrap(values, statistics.fmean, block=14, resamples=10_000)
+    assert by_block[14] == (stats[19], stats[9980])  # 0,19 % por cada lado
+    assert by_block[14][0] < stationary_bootstrap_ci_by_block(values, blocks=(14,))[14][0]
+
+
+def test_single_observation_and_tiny_dispersion():
+    assert stationary_bootstrap_ci([0.004], resamples=50) == (0.004, 0.004)
+    assert cluster_bootstrap_ci([[0.004]], resamples=50) == (0.004, 0.004)
+    assert sharpe_ratio([0.004]) is None and information_ratio([]) is None
+    assert skewness([0.004]) is None and kurtosis([]) is None
+    # Diferencias diminutas: la varianza no puede acabar en una división entre 0.
+    tiny = [1e-200, 0.0, 0.0, 0.0]
+    assert skewness(tiny) == pytest.approx(skewness([1.0, 0.0, 0.0, 0.0]))
+    assert kurtosis(tiny) == pytest.approx(kurtosis([1.0, 0.0, 0.0, 0.0]))
+    assert sharpe_ratio(tiny) == pytest.approx(sharpe_ratio([1.0, 0.0, 0.0, 0.0]))
+
+
+def test_non_finite_values_and_bad_parameters_are_rejected():
+    nan = float("nan")
+    with pytest.raises(ValueError, match="no finitos"):
+        log_excess([nan], [0.0])
+    with pytest.raises(ValueError, match="no finitos"):
+        log_excess([0.0], [math.inf])
+    with pytest.raises(ValueError, match="no finitos"):
+        stationary_bootstrap([0.1, nan], statistics.fmean, block=7)
+    with pytest.raises(ValueError, match="no finitos"):
+        cluster_bootstrap([[0.1], [nan]], statistics.fmean)
+    with pytest.raises(ValueError, match="no finitos"):
+        spearman([1.0, nan, 3.0], [1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="bloque"):
+        stationary_bootstrap([1.0, 2.0], statistics.fmean, block=nan)
+    with pytest.raises(ValueError, match="remuestreo"):
+        stationary_bootstrap([1.0, 2.0], statistics.fmean, block=7, resamples=0)
+    with pytest.raises(ValueError, match="varianza"):
+        sr0(3, -0.1)
+    with pytest.raises(ValueError, match="varianza"):
+        sr0(3, nan)
+    with pytest.raises(ValueError, match="varianza"):
+        deflated_sharpe(0.1, 500, 0.0, 3.0, 3, -0.1)  # el suelo 1/T no la tapa
+    with pytest.raises(ValueError, match="observaciones"):
+        psr(0.1, 0.0, 1, 0.0, 3.0)
+    with pytest.raises(ValueError, match="incompatibles"):
+        psr(0.5, 0.0, 100, 4.0, 1.0)  # 1 − 4·0,5 + 0 < 0
+
+
+def test_spearman_two_points_and_ties_in_both_series():
+    assert spearman([1.0, 2.0], [5.0, 3.0]) == pytest.approx(-1.0)
+    x = [1.0, 1.0, 2.0, 3.0, 3.0]
+    y = [2.0, 1.0, 1.0, 4.0, 4.0]
+    assert spearman(x, y) == pytest.approx(statistics.correlation(x, y, method="ranked"))

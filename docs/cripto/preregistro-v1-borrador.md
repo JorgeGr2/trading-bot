@@ -1,0 +1,74 @@
+# Preregistro de la regla `cripto-v1`
+
+- **Fecha:** 22 de octubre de 2026.
+- **Qué fija:** la regla, sus 2 variantes, la tabla de costes, el protocolo del backtest y el
+  semáforo, **antes** de ejecutar ningún backtest de esta regla con datos reales.
+- **Qué se ha mirado antes:** solo la calidad de los datos (velas descargadas, monedas
+  evaluables por día) y el libro de órdenes para calibrar los costes. Ningún resultado de la
+  regla.
+- **Compromiso:** el primer `copybot crypto backtest` se publica tal como salga, aunque pierda
+  frente a BTC. Cambiar algo de lo que hay aquí exige una versión nueva (`cripto-v2`) con su
+  propio preregistro, un K acumulado que no se reinicia y una luz en vivo que empieza de cero.
+- **Diseño completo:** [`diseno.md`](diseno.md), aprobado el 21-oct-2026.
+
+## 1. La regla
+
+| Grupo | Parámetro | Valor |
+|---|---|---|
+| Universo | Pares | Binance spot contra USDT, también los ya retirados mientras cotizaban |
+| | Exclusiones | Estables y divisas, versiones envueltas o con staking, oro tokenizado y tokens apalancados |
+| | Antigüedad del episodio | ≥ 120 días (un hueco de más de 7 días sin negociación abre otro episodio) |
+| | Calidad | Los 100 últimos días con negociación, sin huecos (salvo los globales) ni cierres ×4 o ÷4 |
+| | Volatilidad mínima | σ de 60 días ≥ 0,5 % diario |
+| | Liquidez | Mediana de 30 días del volumen ≥ 5 M USDT y entre las 100 primeras |
+| Señal | Momentum ajustado | `ln(C(t−1)/C(t−1−L)) / (σ60 · √L)`, L = 7, 14, 30, 60 y 90 días; σ con suelo del 1 % |
+| | Puntuación | Media de los percentiles por horizonte, de 0 a 100 |
+| | Orden | Puntos ↓, momentum ajustado a 30 días ↓, símbolo ↑ |
+| Tendencia | Medias | Cierre frente a sus medias de 20, 50 y 100 días: se entra con 2 o 3 de 3 y se sale con 1 o 0 |
+| Mercado | Filtro | BTC por encima de su media de 100 días; si no, todo a USDT |
+| Cartera | Posiciones | 5; se compra en los puestos 1-5 y se vende a partir del puesto 13 o fuera del universo |
+| | Stop | Cierre ≤ 0,75 × precio de entrada |
+| | Tamaño | min(25 $, (patrimonio − 10 $)/5): 18 $ con 100 $; sin reequilibrios parciales |
+| | Paradas | Pérdida del día del 20 %: sin compras ese día (se reanuda sola). Caída del 50 %: sin compras hasta que se reanude a mano; las ventas siguen |
+| Ejecución | Calendario | Decisión con la vela diaria cerrada (00:00 UTC); en el backtest, en la apertura siguiente; en vivo, al ask/bid de un `bookTicker` reciente |
+| Libro de señales | Medición | Cada día, las 5 primeras con tendencia, 10 $ cada una durante 7 días, frente a BTC en la misma ventana |
+
+## 2. Variantes (solo informativas; ninguna sustituye a la regla)
+
+| Código | Cambio |
+|---|---|
+| V1 «La nº 1 cada día» | 1 posición; se compra el puesto 1 y se vende en cuanto deja de serlo; 90 % del patrimonio |
+| V2 «Sin filtro de mercado» | La regla sin la condición de BTC sobre su media de 100 días |
+
+K registrado = 3 (la regla y las 2 variantes). Cualquier prueba ad hoc sube K y se marca «NO CUENTA».
+
+## 3. Costes
+
+Comisión del 0,10 % por lado (*taker*, sin descuento con BNB) más el medio diferencial y el
+deslizamiento según la mediana de volumen de 30 días:
+
+COSTES_TABLA
+
+Calibración con fotos del libro (`copybot crypto costs show`) tomadas el 22-oct-2026 antes de
+este registro: CALIBRACION_RESUMEN
+
+Pruebas de estrés fijadas: costes ×2 (obligatoria) y ×3, ejecución con un día de retraso, sin
+las 3 monedas que más aportaron, solo supervivientes, retiradas al 0 % y al 100 %.
+
+## 4. Protocolo y semáforo
+
+- Periodo: desde el primer día con al menos 20 monedas evaluables hasta el último día cerrado.
+  Todo el histórico es **pseudo-fuera de muestra**; lo único fuera de muestra de verdad es la
+  prueba en vivo desde este registro.
+- Referencia del semáforo: **BTC comprar y mantener**. Diagnósticos: BTC con el mismo filtro,
+  90 % BTC, cesta de las 10 más negociadas, USDT y 1.000 carteras al azar (semillas 1-1.000).
+- Estadística: exceso diario logarítmico frente a BTC; bootstrap estacionario con bloques de
+  7, 28 y 56 días (cuenta el intervalo más ancho); Sharpe deflactado con el K registrado.
+- Semáforo (apartado 9 del diseño) con las decisiones del propietario: caída máxima < 25 %
+  para el verde (25-50 %: ámbar; ≥ 50 %: rojo); verde en vivo estricto (revisión cada 28 días,
+  como mucho 13, z = 2,89); parada diaria con reanudación automática; con la caída del 50 % se
+  deja de comprar y las ventas siguen sus reglas.
+
+## 5. Huellas (las comprueba `copybot crypto prereg check`)
+
+HUELLAS

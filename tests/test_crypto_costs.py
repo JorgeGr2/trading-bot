@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+import math
+import random
+from dataclasses import replace
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -42,6 +45,8 @@ M = 1_000_000
         (5 * M, 0.0015),
         (1 * M, 0.0015),  # por debajo de 5 M$: el tramo de 5-10 M$
         (0.0, 0.0015),
+        (None, 0.0015),  # sin mediana conocida: el tramo más caro, nunca el más barato
+        (math.nan, 0.0015),
     ],
 )
 def test_cost_tiers(median_qv, expected):
@@ -60,6 +65,8 @@ def test_round_trip_matches_the_table_and_stress_multiplies():
     assert round_trip_cost(300 * M, 2) == pytest.approx(2 * round_trip_cost(300 * M))
     with pytest.raises(ValueError):
         cost_per_side(300 * M, -1)
+    with pytest.raises(ValueError):
+        cost_per_side(300 * M, math.nan)
 
 
 def test_cost_table_hash_is_frozen():
@@ -98,8 +105,13 @@ def test_stress_multiplies_spread_and_fee():
 
 
 def test_buy_needs_a_positive_open():
-    with pytest.raises(ValueError):
-        buy_qty(18.0, 0.0, 300 * M)
+    for bad in (0.0, -1.0, math.nan):
+        with pytest.raises(ValueError):
+            buy_qty(18.0, bad, 300 * M)
+    for bad in (-1.0, math.nan):
+        with pytest.raises(ValueError):
+            sell_usd(1.0, bad, 300 * M)
+    assert sell_usd(1.0, 0.0, 300 * M) == 0.0  # una moneda que no vale nada no da efectivo
 
 
 # --- En vivo: stepSize y minNotional --------------------------------------------------------
@@ -114,6 +126,9 @@ def test_round_qty_floors_to_step():
     assert round_qty(D("5"), D("1")) == 5
     assert round_qty(D("1.23456"), None) == D("1.23456")
     assert round_qty(D("1.23456"), D(0)) == D("1.23456")  # MARKET_LOT_SIZE con step 0
+    assert round_qty(D("1.7"), D("0.5")) == D("1.5")
+    # 29 cifras: un cociente redondeado al par subiría a 18 pasos (9 > 8,999…).
+    assert round_qty(D("8.9999999999999999999999999999"), D("0.5")) == D("8.5")
 
 
 def test_min_notional_uses_at_least_five_dollars():
@@ -141,6 +156,36 @@ def test_live_round_trip_is_exact():
     assert sell.fee_usd == D("0.0178901")
     assert sell.net_usd == D("17.8722099")
     assert sell.note == ""
+
+
+def test_live_buy_never_spends_more_than_requested():
+    """`qty·precio·(1 + f) ≤ usd` siempre, con y sin `stepSize`, y la cantidad es la mayor que
+    cabe: un paso más ya no cabría."""
+    # Sin stepSize, 18 $ a 0,07692308: con redondeo al par salían 18,00000000000000000000000001.
+    fill = live_buy(D(18), D("0.07692308"), D(10**9), None, None)
+    assert fill is not None and fill.net_usd <= D(18)
+
+    rng = random.Random(65)  # noqa: S311
+    steps = [None, D(0), D("0.00000001"), D("0.001"), D("0.1"), D("0.5"), D(1), D(10)]
+    bought = 0
+    for _ in range(4_000):
+        usd = D(rng.randint(500, 2_500)) / 100
+        ask = D(rng.randint(1, 10**9)) / D(10) ** rng.randint(0, 8)
+        depth = D(rng.randint(0, 10**7)) / 100
+        step = rng.choice(steps)
+        fill = live_buy(usd, ask, depth, step, None)
+        if fill is None:
+            continue
+        bought += 1
+        assert fill.net_usd <= usd
+        assert fill.price == (ask * D("1.005") if depth * ask < usd else ask)
+        assert fill.qty * fill.price >= D(5)
+        if step:
+            assert fill.qty % step == 0
+            with localcontext() as ctx:
+                ctx.prec = 100  # cuenta exacta
+                assert (fill.qty + step) * fill.price * (1 + D(str(FEE))) > usd
+    assert bought > 1_000
 
 
 def test_live_buy_rejected_below_min_notional():
@@ -230,6 +275,63 @@ def test_calibrate_flags_tiers_above_the_table_and_thin_books():
     assert "50-200 M$" in warnings[0] and "subir la tabla" in warnings[0]
     assert "0,0525 %" in warnings[0] and "0,04 %" in warnings[0]
     assert "10-50 M$" in warnings[1] and "siguiente nivel" in warnings[1]
+
+
+@pytest.mark.parametrize("mid", ["0.000123", "0.3", "1", "37.5", "100", "61234.5"])
+@pytest.mark.parametrize("as_float", [False, True])
+def test_calibrate_measured_equal_to_table_is_not_above_it(mid, as_float):
+    """Si el p75 + 0,02 % es justo el coste de la tabla, la tabla no se queda corta: el ruido de
+    la coma flotante no puede pedir que se suba."""
+    conv = float if as_float else D
+    snaps = []
+    for i, (min_volume, table_cost) in enumerate(COST_TIERS):
+        half = (D(str(table_cost)) - D("0.0002")) * D(mid)
+        bid, ask = D(mid) - half, D(mid) + half
+        snaps += [(f"S{i}{k}", conv(bid), conv(ask), conv(10**6), min_volume) for k in range(3)]
+    cal = calibrate(snaps)
+    assert [t.measured_cost for t in cal.tiers] == [c for _, c in COST_TIERS]
+    assert cal.exceeded == [] and cal.table_ok and cal.warnings() == []
+
+
+def test_calibrate_single_snapshot_and_order_do_not_matter():
+    one = calibrate([_quote("A", 5, 1_000, 300 * M)])
+    assert one.tiers[0].samples == 1
+    assert one.tiers[0].measured_cost == pytest.approx(0.0007)  # 5 pb + 2 pb
+    snaps = [_quote(f"B{i}", i, 10 * i, 80 * M) for i in range(9)]
+    shuffled = list(snaps)
+    random.Random(7).shuffle(shuffled)  # noqa: S311
+    assert calibrate(snaps) == calibrate(shuffled)
+
+
+def test_calibrate_counts_missing_data_as_invalid():
+    cal = calibrate(
+        [
+            ("A", None, D(1), D(100), 300 * M),
+            ("B", D(1), None, D(100), 300 * M),
+            ("C", D(1), D(1), None, 300 * M),
+            ("D", D(1), D(1), D(100), None),
+            ("E", D(1), D(1), D(-1), 300 * M),
+            ("F", D(1), D(1), D(100), 300 * M),
+        ]
+    )
+    assert cal.invalid == 5 and cal.below_min == 0
+    assert [t.samples for t in cal.tiers] == [1, 0, 0, 0]
+
+
+def test_thin_book_in_the_most_expensive_tier_asks_to_raise_its_cost():
+    """El tramo de 5-10 M$ no tiene «siguiente nivel»: el aviso pide subir su coste."""
+    cal = calibrate([_quote(f"D{i}", 0, 10 if i < 3 else 1_000, 7 * M) for i in range(4)])
+    last = cal.tiers[-1]
+    assert last.thin_share == 0.75 and last.thin_book_common and last.is_most_expensive
+    (warning,) = cal.warnings()
+    assert "5-10 M$" in warning and "75 %" in warning
+    assert "tramo más caro" in warning and "subir su coste" in warning
+    assert "siguiente nivel" not in warning
+    # Un 25,01 % ya es «habitual» y el aviso no lo redondea a un 25 % que no lo sería.
+    t = replace(cal.tiers[1], thin_share=0.2501)
+    assert t.thin_book_common
+    first, _ = replace(cal, tiers=(cal.tiers[0], t, *cal.tiers[2:])).warnings()
+    assert "50-200 M$" in first and "25,01 %" in first and "siguiente nivel" in first
 
 
 def test_calibrate_without_snapshots_flags_nothing():

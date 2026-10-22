@@ -7,8 +7,8 @@ interfaz (``crypto semaforo --json``). No lee la base de datos ni la red.
 
 * Colores: ``verde``, ``ambar``, ``rojo`` y ``gris`` (faltan datos para juzgar).
 * **Lo dudoso se resuelve en contra de la estrategia.** Un dato que falta (``None``) o que no
-  es un número nunca cumple un criterio, así que nunca da el verde. Tampoco pone una luz en
-  rojo: el rojo exige un fallo medido.
+  es un número finito (NaN o infinito) nunca cumple un criterio, así que nunca da el verde.
+  Tampoco pone una luz en rojo: el rojo exige un fallo medido.
 * Para el verde tienen que cumplirse **todos** los criterios de la luz a la vez (los de datos
   suficientes, los que la pondrían en rojo y los propios del verde): es un contraste de
   intersección-unión y no infla el error de tipo I.
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 VERDE = "verde"
@@ -39,7 +39,9 @@ MAX_SHARE_SMALL_UNIVERSE = 0.05  # como mucho el 5 % de los días con |U| < 20
 MIN_COVERAGE = 0.98
 CI_BLOCKS = (7, 28, 56)  # longitudes de bloque L del bootstrap estacionario
 MIN_DSR = 0.95
-MIN_NULL_PERCENTILE = 95.0  # hay que **superarlo**: elegir moneda aporta algo
+# B5: el valor final supera el percentil 95 del nulo. Con ``null_percentile`` = % de carteras
+# al azar **estrictamente** por debajo, eso es ≥ 95 (lo mismo que dice el informe).
+MIN_NULL_PERCENTILE = 95.0
 GREEN_MAX_DRAWDOWN = 0.25  # caída máxima para el verde (decisión aprobada); 25-50 %: ámbar
 RED_DRAWDOWN = 0.50  # la cartera de 100 $ se habría parado
 
@@ -99,12 +101,16 @@ class BacktestEvidence:
     # L → límite inferior del intervalo del exceso anual (hacen falta L = 7, 28 y 56).
     ci_low_by_block: dict[int, float]
     dsr: float | None  # Sharpe deflactado con el K registrado
-    null_percentile: float | None  # 0-100: % de las carteras al azar que acaban por debajo
+    # 0-100: % de las carteras al azar que acaban **estrictamente** por debajo.
+    null_percentile: float | None
     signals_book_mean_excess: float | None  # libro de señales: exceso medio por operación
     signals_book_ci_low: float | None  # límite inferior (L = 28) de ese exceso medio
     max_drawdown: float | None  # caída máxima, 0-1 (0,22 = 22 %)
     archive_imported: bool  # archivo de pares retirados de data.binance.vision
     btc_filter_beats_strategy: bool  # «BTC con el mismo filtro» acaba por encima
+    # L → límite superior del mismo intervalo. Opcional: solo sirve para mostrar el margen
+    # de error completo («−6 % a +25 %»); el criterio B1 mira los límites inferiores.
+    ci_high_by_block: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -217,8 +223,9 @@ class Semaforo:
 
 
 def _clean(x: float | None) -> float | None:
-    """``None`` también para NaN: un dato que no es un número cuenta como que falta."""
-    return None if x is None or math.isnan(x) else x
+    """``None`` también para NaN e infinitos: un dato que no es un número finito cuenta como
+    que falta (como en ``backtest/stats.py``, es un error de datos)."""
+    return None if x is None or not math.isfinite(x) else x
 
 
 def _gt(x: float | None, threshold: float) -> bool:
@@ -243,12 +250,15 @@ def _le(x: float | None, threshold: float) -> bool:
 
 
 def _num(x: float, decimals: int = 0, *, signed: bool = False) -> str:
-    """Número en formato español: punto de miles, coma decimal y signo menos tipográfico."""
-    value = round(x, decimals)
-    body = f"{abs(value):,.{decimals}f}".translate(_ES_SEPARATORS)
-    if value < 0:
+    """Número en formato español: punto de miles, coma decimal y signo menos tipográfico.
+
+    El signo es el del valor **sin redondear**, para que el texto no contradiga la
+    comparación con 0 del criterio: −0,001 con dos decimales es «−0,00», no «0,00».
+    """
+    body = f"{abs(round(x, decimals)):,.{decimals}f}".translate(_ES_SEPARATORS)
+    if x < 0:
         return MINUS + body
-    return f"+{body}" if signed and value > 0 else body
+    return f"+{body}" if signed and x > 0 else body
 
 
 def _trim(text: str) -> str:
@@ -264,14 +274,30 @@ def _amount(x: float | None, decimals: int = 0, unit: str = "") -> str:
 
 def _pct(x: float | None, *, signed: bool = False, unit: str = " %") -> str:
     """Tanto por uno en porcentaje con un decimal como mucho: 0,092 → «+9,2 %» (con
-    ``signed``), 0,09 → «9 %», o «sin datos»."""
+    ``signed``), 0,09 → «9 %», o «sin datos». Un valor distinto de 0 que con un decimal se
+    vería como 0 lleva dos: 0,0004 → «+0,04 %», para no aparentar un 0 exacto."""
     v = _clean(x)
-    return SIN_DATOS if v is None else _trim(_num(v * 100, 1, signed=signed)) + unit
+    if v is None:
+        return SIN_DATOS
+    value = v * 100
+    decimals = 2 if 0 < abs(value) < 0.05 else 1
+    return _trim(_num(value, decimals, signed=signed)) + unit
 
 
 def _yearly(x: float | None) -> str:
     """Exceso anual: 0,09 → «+9 %/año»."""
     return _pct(x, signed=True, unit=" %/año")
+
+
+def _from(text: str, suffix: str = "") -> str:
+    """«desde +0,5 %» para un límite inferior medido; «sin datos» si falta."""
+    return text if text == SIN_DATOS else f"desde {text}{suffix}"
+
+
+def _measured(prefix: str, text: str, suffix: str = "") -> str:
+    """``prefix + text + suffix`` si el dato está medido; si falta, solo «sin datos» (para
+    no escribir «caída máxima del sin datos»)."""
+    return text if text == SIN_DATOS else f"{prefix}{text}{suffix}"
 
 
 def _yes_no(flag: bool) -> str:
@@ -391,7 +417,7 @@ def _backtest_red_checks(bt: BacktestEvidence) -> list[tuple[Criterion, bool]]:
             Criterion(
                 "BR3",
                 "La cartera de 100 $ no se habría parado por una caída del 50 %",
-                f"caída máxima del {_pct(bt.max_drawdown)}",
+                _measured("caída máxima del ", _pct(bt.max_drawdown)),
                 f"< {_pct(RED_DRAWDOWN)} (si no, ROJO)",
                 _lt(bt.max_drawdown, RED_DRAWDOWN),
             ),
@@ -401,13 +427,23 @@ def _backtest_red_checks(bt: BacktestEvidence) -> list[tuple[Criterion, bool]]:
 
 
 def _b1(bt: BacktestEvidence) -> Criterion:
+    """B1: el límite inferior es > 0 con cada L. El texto muestra el intervalo que abarca
+    los tres (el límite inferior más bajo y el superior más alto), como el informe del
+    backtest; sin los límites superiores, solo desde dónde empieza."""
     lows = {block: _clean(bt.ci_low_by_block.get(block)) for block in CI_BLOCKS}
+    highs = [_clean(bt.ci_high_by_block.get(block)) for block in CI_BLOCKS]
     known = [low for low in lows.values() if low is not None]
+    known_highs = [high for high in highs if high is not None]
     missing = [str(block) for block, low in lows.items() if low is None]
     if missing:
         detail = f"falta el intervalo con L = {', '.join(missing)}"
+    elif len(known_highs) == len(CI_BLOCKS):
+        detail = (
+            f"margen de error: {_pct(min(known), signed=True)} a "
+            f"{_pct(max(known_highs), signed=True)}"
+        )
     else:
-        detail = f"margen de error desde {_pct(min(known), signed=True)}"
+        detail = f"margen de error {_from(_pct(min(known), signed=True))}"
     blocks = f"{', '.join(str(b) for b in CI_BLOCKS[:-1])} y {CI_BLOCKS[-1]}"
     return Criterion(
         "B1",
@@ -459,14 +495,19 @@ def _backtest_green_checks(bt: BacktestEvidence) -> list[Criterion]:
             "B5",
             "Elegir moneda aporta algo frente a elegir al azar",
             null_text,
-            f"más del {_num(MIN_NULL_PERCENTILE)} %",
-            _gt(bt.null_percentile, MIN_NULL_PERCENTILE),
+            f"≥ {_num(MIN_NULL_PERCENTILE)} % (supera el percentil {_num(MIN_NULL_PERCENTILE)} "
+            "del azar)",
+            _ge(bt.null_percentile, MIN_NULL_PERCENTILE),
         ),
         Criterion(
             "B6",
             "Libro de señales: las elegidas ganan a BTC en los 7 días siguientes",
-            f"{_pct(bt.signals_book_mean_excess, signed=True)} por operación "
-            f"(margen de error desde {_pct(bt.signals_book_ci_low, signed=True)})",
+            _measured(
+                "",
+                _pct(bt.signals_book_mean_excess, signed=True),
+                f" por operación (margen de error "
+                f"{_from(_pct(bt.signals_book_ci_low, signed=True))})",
+            ),
             "media > 0 y límite inferior (L = 28) > 0",
             _gt(bt.signals_book_mean_excess, 0) and _gt(bt.signals_book_ci_low, 0),
         ),
@@ -618,7 +659,8 @@ def _live_red_checks(live: LiveEvidence) -> list[tuple[Criterion, bool]]:
         (
             Criterion(
                 "VR5",
-                "En las revisiones no va peor que el 5 % de los peores arranques del pasado",
+                "En las revisiones no queda entre el 5 % de peores arranques del pasado de la "
+                "misma duración",
                 starts,
                 "por encima del percentil 5 (si no, ROJO)",
                 not live.below_p5_of_starts,
@@ -640,8 +682,8 @@ def _sequential_text(live: LiveEvidence) -> str:
     portfolio = _pct(live.cumulative_excess_ci_low_portfolio, signed=True, unit=" %/año")
     signals = _pct(live.cumulative_excess_ci_low_signals, signed=True)
     return (
-        f"{when} ({n} de {MAX_REVIEWS}): cartera desde {portfolio}; "
-        f"libro de señales desde {signals} por operación"
+        f"{when} ({n} de {MAX_REVIEWS}): cartera {_from(portfolio)}; "
+        f"libro de señales {_from(signals, ' por operación')}"
     )
 
 
@@ -753,10 +795,12 @@ def evaluate(
     """Semáforo completo: las dos luces, la conclusión, los criterios y los mensajes.
 
     ``next_review_day`` es la fecha de la próxima revisión (``next_review_date``); se omite
-    cuando ya se hicieron las 13. Los días necesarios son el MinTRL que trae ``live``.
+    cuando ya se hicieron las 13. Los días necesarios son el MinTRL que trae ``live``,
+    redondeado hacia arriba (``None`` si falta o no es un número finito).
     """
     color_bt, criterios_bt, mensajes = backtest_light(bt)
     color_live, criterios_live = live_light(live, color_bt)
+    trl = None if live is None else _clean(live.min_trl_days)
     if live is not None and reviews_exhausted(live):
         mensajes = [*mensajes, MSG_SIN_VENTAJA]
     hechas = 0 if live is None else min(max(live.review_number, 0), MAX_REVIEWS)
@@ -767,7 +811,7 @@ def evaluate(
         huella=huella,
         criterios=(*criterios_bt, *criterios_live),
         mensajes=tuple(mensajes),
-        dias_necesarios=None if live is None else live.min_trl_days,
+        dias_necesarios=None if trl is None else math.ceil(trl),  # MinTRL, en días enteros
         revision=Revision(
             hechas=hechas,
             maximo=MAX_REVIEWS,

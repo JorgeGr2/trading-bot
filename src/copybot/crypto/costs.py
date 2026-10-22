@@ -21,7 +21,7 @@ import json
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_FLOOR, Decimal, localcontext
 
 FEE = 0.001  # comisión por lado: 0,10 % (taker, sin descuento con BNB)
 
@@ -40,6 +40,9 @@ CALIBRATION_CUSHION = 0.0002  # colchón del 0,02 % sobre el p75 del medio difer
 CALIBRATION_PERCENTILE = 0.75
 THIN_BOOK_USD = 25.0  # una foto con askQty·ask por debajo de esto cuenta como libro fino
 THIN_BOOK_COMMON = 0.25  # más de esta fracción de fotos finas: el libro fino es «habitual»
+# El coste medido se redondea a 1e-10 (0,00000001 %): quita el ruido de la coma flotante, que
+# si no hace que un tramo medido igual al de la tabla parezca superarlo.
+MEASURED_DECIMALS = 10
 
 _FEE_DEC = Decimal(str(FEE))
 
@@ -47,26 +50,29 @@ _FEE_DEC = Decimal(str(FEE))
 # --- Tabla de costes ------------------------------------------------------------------------
 
 
-def _tier_index(median_qv: float) -> int:
-    for i, (min_volume, _) in enumerate(COST_TIERS):
-        if median_qv >= min_volume:
-            return i
+def _tier_index(median_qv: float | None) -> int:
+    """Tramo de la tabla; sin mediana conocida (None o NaN), el último, el más caro."""
+    if median_qv is not None:
+        volume = float(median_qv)
+        for i, (min_volume, _) in enumerate(COST_TIERS):
+            if volume >= min_volume:
+                return i
     return len(COST_TIERS) - 1
 
 
-def cost_per_side(median_qv: float, multiplier: float = 1.0) -> float:
+def cost_per_side(median_qv: float | None, multiplier: float = 1.0) -> float:
     """Medio diferencial más deslizamiento `c` por lado, en tanto por uno.
 
-    Se elige el tramo con la mediana de volumen de 30 días a fecha t; por debajo de 5 M$ se
-    aplica el tramo de 5-10 M$. `multiplier` es la prueba de estrés de costes (×2 obligatoria,
-    ×3 informativa).
+    Se elige el tramo con la mediana de volumen de 30 días a fecha t; por debajo de 5 M$ (o sin
+    mediana conocida) se aplica el tramo de 5-10 M$, el más caro. `multiplier` es la prueba de
+    estrés de costes (×2 obligatoria, ×3 informativa).
     """
-    if multiplier < 0:
+    if not multiplier >= 0:
         raise ValueError("el multiplicador de costes no puede ser negativo")
-    return COST_TIERS[_tier_index(float(median_qv))][1] * multiplier
+    return COST_TIERS[_tier_index(median_qv)][1] * multiplier
 
 
-def round_trip_cost(median_qv: float, multiplier: float = 1.0) -> float:
+def round_trip_cost(median_qv: float | None, multiplier: float = 1.0) -> float:
     """Coste aproximado de ida y vuelta, 2·(f + c), en tanto por uno (columna de la tabla)."""
     return 2 * (FEE * multiplier + cost_per_side(median_qv, multiplier))
 
@@ -87,23 +93,25 @@ def cost_table_hash(tiers: Sequence[tuple[float, float]] = COST_TIERS, fee: floa
 # --- Backtest (float, a la apertura de la vela siguiente) -----------------------------------
 
 
-def buy_qty(usd: float, open_price: float, median_qv: float, mult: float = 1.0) -> float:
+def buy_qty(usd: float, open_price: float, median_qv: float | None, mult: float = 1.0) -> float:
     """Cantidad que se compra con `usd` a la apertura `O(t+1)`.
 
     `qty = usd / (O·(1 + c)·(1 + f))`. Con la prueba de estrés, `mult` multiplica tanto `c`
     como la comisión: costes ×2 es el doble del coste total.
     """
-    if open_price <= 0:
+    if not open_price > 0:
         raise ValueError("precio de apertura no válido")
     c = cost_per_side(median_qv, mult)
     return usd / (open_price * (1 + c) * (1 + FEE * mult))
 
 
-def sell_usd(qty: float, price: float, median_qv: float, mult: float = 1.0) -> float:
+def sell_usd(qty: float, price: float, median_qv: float | None, mult: float = 1.0) -> float:
     """Efectivo que entra al vender `qty` a la apertura `O(t+1)`.
 
     `qty·O·(1 − c)·(1 − f)`, con `mult` aplicado a `c` y a la comisión, igual que en la compra.
     """
+    if not price >= 0:
+        raise ValueError("precio de venta no válido")
     c = cost_per_side(median_qv, mult)
     return qty * price * (1 - c) * (1 - FEE * mult)
 
@@ -131,11 +139,14 @@ class LiveFill:
 def round_qty(qty: Decimal, step: Decimal | None) -> Decimal:
     """Redondea la cantidad **a la baja** al múltiplo de `step` (`stepSize` del par).
 
-    Sin `step` (None o 0) la cantidad no cambia.
+    Sin `step` (None o 0) la cantidad no cambia. El cociente también se redondea hacia abajo:
+    con un `step` que no sea potencia de 10 un redondeo al par podría dar un múltiplo de más.
     """
     if not step:
         return qty
-    return (qty / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    with localcontext() as ctx:
+        ctx.rounding = ROUND_FLOOR
+        return (qty / step).to_integral_value(rounding=ROUND_FLOOR) * step
 
 
 def min_notional_ok(qty: Decimal, price: Decimal, min_notional: Decimal | None) -> bool:
@@ -165,18 +176,22 @@ def live_buy(
 
     - Si `askQty·ask < usd` (libro fino), el precio sube un 0,5 % y se anota.
     - `qty = usd / (precio·(1 + f))`, redondeada a la baja al `stepSize`: nunca se gasta más
-      de `usd`.
+      de `usd`, tampoco sin `stepSize` (todas las cuentas se redondean hacia abajo).
     - Devuelve None (no se compra) si `qty·precio < max(minNotional, 5 $)`.
     """
-    if ask <= 0:
+    if not ask > 0:
         raise ValueError("ask no válido: sin libro no se puede comprar")
     thin = ask_qty * ask < usd
     price = ask * (1 + THIN_BOOK_SLIPPAGE) if thin else ask
-    qty = round_qty(usd / (price * (1 + _FEE_DEC)), step)
+    with localcontext() as ctx:
+        # Hacia abajo en cada paso: qty·precio·(1 + f) nunca supera `usd` por un redondeo.
+        ctx.rounding = ROUND_FLOOR
+        qty = round_qty(usd / price / (1 + _FEE_DEC), step)
+        gross = qty * price
+        fee = gross * _FEE_DEC
+        net = gross + fee
     if qty <= 0 or not min_notional_ok(qty, price, min_notional):
         return None
-    gross = qty * price
-    fee = gross * _FEE_DEC
     note = ""
     if thin:
         note = (
@@ -188,7 +203,7 @@ def live_buy(
         price=price,
         fee_usd=fee,
         gross_usd=gross,
-        net_usd=gross + fee,
+        net_usd=net,
         extra_slippage=thin,
         note=note,
     )
@@ -200,7 +215,7 @@ def live_sell(qty: Decimal, bid: Decimal, step: Decimal | None) -> LiveFill:
     Si el redondeo deja un resto sin vender, se anota. La comprobación de `minNotional` queda
     en manos del llamador (`min_notional_ok`).
     """
-    if bid <= 0:
+    if not bid > 0:
         raise ValueError("bid no válido: sin libro no se puede vender")
     sold = round_qty(qty, step)
     gross = sold * bid
@@ -215,8 +230,14 @@ def live_sell(qty: Decimal, bid: Decimal, step: Decimal | None) -> LiveFill:
 
 # --- Calibración con fotos del libro --------------------------------------------------------
 
-# (símbolo, bid, ask, askQty, mediana de volumen de 30 días en USDT)
-Snapshot = tuple[str, Decimal | float, Decimal | float, Decimal | float, Decimal | float]
+# (símbolo, bid, ask, askQty, mediana de volumen de 30 días en USDT); None = dato que falta
+Snapshot = tuple[
+    str,
+    Decimal | float | None,
+    Decimal | float | None,
+    Decimal | float | None,
+    Decimal | float | None,
+]
 
 
 def _percentile(values: Sequence[float], q: float) -> float:
@@ -228,8 +249,13 @@ def _percentile(values: Sequence[float], q: float) -> float:
     return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
 
 
-def _pct(x: float) -> str:
-    text = f"{x * 100:.4f}".rstrip("0").rstrip(".")
+def _pct(x: float, decimals: int = MEASURED_DECIMALS - 2) -> str:
+    """Tanto por uno en porcentaje con coma decimal y sin ceros de más: 0.000525 → «0,0525 %».
+
+    Por defecto con la misma resolución que el coste medido, para que un aviso de «supera»
+    nunca muestre dos cifras iguales.
+    """
+    text = f"{x * 100:.{decimals}f}".rstrip("0").rstrip(".")
     return f"{text.replace('.', ',')} %"
 
 
@@ -248,7 +274,7 @@ class TierCalibration:
     min_volume: float
     table_cost: float  # c de la tabla
     samples: int
-    measured_cost: float | None  # p75 de (ask − bid)/(2·mid) + 0,02 %; None sin fotos
+    measured_cost: float | None  # p75 de (ask − bid)/(2·mid) + 0,02 % (a 1e-10); None sin fotos
     thin_share: float | None  # fracción de fotos con askQty·ask < 25 $
 
     @property
@@ -257,17 +283,25 @@ class TierCalibration:
 
     @property
     def exceeds_table(self) -> bool:
+        """El coste medido supera **estrictamente** al de la tabla (igualarlo no es superarlo)."""
         return self.measured_cost is not None and self.measured_cost > self.table_cost
 
     @property
     def thin_book_common(self) -> bool:
+        """Más del 25 % de las fotos con `askQty·ask < 25 $`."""
         return self.thin_share is not None and self.thin_share > THIN_BOOK_COMMON
+
+    @property
+    def is_most_expensive(self) -> bool:
+        """Último tramo: no hay un nivel de coste siguiente al que pasar."""
+        return self.index == len(COST_TIERS) - 1
 
 
 @dataclass(frozen=True)
 class Calibration:
     tiers: tuple[TierCalibration, ...]
-    invalid: int = 0  # fotos sin bid/ask válidos (cero o cruzados)
+    # Fotos sin datos válidos: bid/ask nulos, cero o cruzados, o askQty o volumen nulos.
+    invalid: int = 0
     below_min: int = 0  # pares por debajo del último tramo: no entran en el universo
 
     @property
@@ -292,7 +326,12 @@ class Calibration:
         ]
         out += [
             f"Tramo {t.label}: libro fino (askQty·ask < 25 $) en el "
-            f"{(t.thin_share or 0.0) * 100:.0f} % de las fotos; pasa al siguiente nivel de coste."
+            f"{_pct(t.thin_share or 0.0, 2)} de las fotos; "
+            + (
+                "es ya el tramo más caro: hay que subir su coste antes de registrar v1."
+                if t.is_most_expensive
+                else "pasa al siguiente nivel de coste."
+            )
             for t in self.thin_common
         ]
         return out
@@ -302,16 +341,20 @@ def calibrate(snapshots: Iterable[Snapshot]) -> Calibration:
     """Mide el coste real por tramo con fotos de `bookTicker` + `ticker/24hr`.
 
     Para cada tramo: percentil 75 del medio diferencial (ask − bid)/(2·mid) más un colchón del
-    0,02 %, y la fracción de fotos con `askQty·ask < 25 $`. Las fotos con precios no válidos y
-    las de pares por debajo del último tramo (fuera del universo) se cuentan pero no se usan.
+    0,02 %, y la fracción de fotos con `askQty·ask < 25 $`. Las fotos con datos que faltan o
+    precios no válidos y las de pares por debajo del último tramo (fuera del universo) se
+    cuentan pero no se usan. Mismas fotos, en cualquier orden, dan el mismo resultado.
     """
     spreads: list[list[float]] = [[] for _ in COST_TIERS]
     thin = [0] * len(COST_TIERS)
     invalid = below_min = 0
     lowest = COST_TIERS[-1][0]
     for _symbol, bid, ask, ask_qty, median_qv in snapshots:
+        if bid is None or ask is None or ask_qty is None or median_qv is None:
+            invalid += 1
+            continue
         b, a, depth, volume = float(bid), float(ask), float(ask_qty), float(median_qv)
-        if not 0 < b <= a:
+        if not 0 < b <= a or not depth >= 0:
             invalid += 1
             continue
         if not volume >= lowest:
@@ -329,7 +372,10 @@ def calibrate(snapshots: Iterable[Snapshot]) -> Calibration:
             table_cost=table_cost,
             samples=len(values),
             measured_cost=(
-                _percentile(values, CALIBRATION_PERCENTILE) + CALIBRATION_CUSHION
+                round(
+                    _percentile(values, CALIBRATION_PERCENTILE) + CALIBRATION_CUSHION,
+                    MEASURED_DECIMALS,
+                )
                 if values
                 else None
             ),

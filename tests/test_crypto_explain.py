@@ -322,8 +322,9 @@ def test_sell_reasons_of_the_rule_match_section_6_1():
 
 
 def test_other_sell_reasons():
+    # Apartado 6.6: 7 días seguidos sin vela → cierre al último cierre × 0,90.
     assert sell_reason("retirada") == (
-        f"retirada de Binance: 7 días seguidos sin cotizar; se cierra al último precio {MINUS}10 %"
+        "retirada de Binance: 7 días seguidos sin cotizar; se cierra al último precio menos un 10 %"
     )
     assert sell_reason("retirada", renamed_to="POLUSDT") == (
         "cambio de nombre a POLUSDT: se cierra al último precio, sin penalización"
@@ -554,3 +555,175 @@ def test_check_text_allows_only_the_fixed_disclaimers():
         check_text("Lo pasado no garantiza lo futuro, pero esto garantiza ganar.")
     with pytest.raises(ValueError):
         check_text("Lo pasado no garantiza lo futuro.", allowed=())
+
+
+# --- Revisión: datos que faltan, límites y casos de la maqueta ------------------------------
+
+NAN = float("nan")
+INF = float("inf")
+
+
+def test_non_finite_values_show_a_dash_without_unit():
+    # Apartado 10.3: signo y unidad solo con un número; si falta, «—» y nada más.
+    for value in (None, NAN, INF, -INF):
+        assert fmt_usd(value) == "—"
+        assert fmt_pp(value) == "—"
+        assert fmt_vol(value) == "—"
+        assert fmt_trend(value) == "—"
+        assert fmt_pct(value) == "—"
+        assert fmt_musd(value) == "—"
+    assert coin_status(rank=5, n=84, score=NAN, trend_share=NAN) == (
+        "puesto 5 de 84; puntos —; tendencia —"
+    )
+
+
+def test_fmt_num_never_fails_by_size():
+    assert fmt_num(1e30, 2) == "1.000.000.000.000.000.000.000.000.000.000,00"
+    assert fmt_pct(1e27, 1).endswith(",0 %")
+
+
+def test_fmt_musd_threshold_after_rounding():
+    assert fmt_musd(9.94 * M) == "9,9 M$"
+    assert fmt_musd(9.96 * M) == "10 M$"  # nunca «10,0 M$»
+    assert fmt_musd(5 * M) == "5,0 M$"
+
+
+def test_fmt_pp_rounds_like_fmt_pct():
+    # «Frente a BTC» y los porcentajes redondean igual (medios hacia fuera).
+    assert fmt_pp(0.145) == "+15 puntos"
+    assert fmt_pct(0.145, 0) == "+15 %"
+
+
+def test_ret_and_metrics_ignore_non_finite_closes():
+    assert ret([NAN, 1.0], 1) is None
+    assert ret([1.0, INF], 1) is None
+    closes = closes_from_log_returns([0.01] * 40)
+    closes[-5] = INF
+    assert best_day_share(closes) is None
+    assert best_day(closes) is None
+    year = closes_from_log_returns([0.0] * 400)
+    year[-10] = NAN
+    assert p5_week(year) is None
+
+
+def test_p5_week_needs_exactly_365_closes():
+    # Apartado 10.2: con menos de 365 velas, «tiene menos de un año en Binance».
+    rng = random.Random(5)  # noqa: S311
+    closes = closes_from_log_returns([rng.gauss(0, 0.03) for _ in range(364)])
+    assert len(closes) == 365
+    assert p5_week(closes) is not None
+    assert p5_week(closes[1:]) is None
+
+
+def test_momentum_percentile_spec_formula_and_robustness():
+    # Fórmula del apartado 5.1 con n = 5: (menores + ½·(iguales − 1)) / (n − 1).
+    population = [0.3, 0.1, 0.2, 0.2, 0.2]
+    assert momentum_percentile(0.2, population) == pytest.approx((1 + 0.5 * 2) / 4)
+    # Si la propia moneda no viene en la población, cuenta como una más: nunca < 0 ni > 1.
+    assert momentum_percentile(0.05, [0.1, 0.2]) == pytest.approx(0.0)
+    assert momentum_percentile(0.5, [0.1, 0.2]) == pytest.approx(1.0)
+    assert momentum_percentile(0.15, [0.1, 0.2]) == pytest.approx(0.5)
+    # Los valores no finitos no cuentan.
+    assert momentum_percentile(0.2, [0.1, 0.2, NAN]) == pytest.approx(1.0)
+    assert momentum_percentile(NAN, [0.1, 0.2]) is None
+    assert momentum_percentile(0.1, []) is None
+
+
+def test_risk_missing_data_counts_as_high():
+    # «Lo dudoso se resuelve en contra»: un dato que falta no puede dar Bajo ni Medio.
+    for change in (
+        {"vol_daily": None},
+        {"vol_daily": NAN},
+        {"episode_days": None},
+        {"median_qv": None},
+        {"median_qv": NAN},
+    ):
+        assert risk_level(**{**SAFE, **change}) == "Alto"
+    assert risk_level(**SAFE, spread_pct=NAN) == "Alto"
+    assert risk_level(**{**SAFE, "best_day_share": NAN}) == "Bajo"
+    assert risk_level(**SAFE, spread_pct=None) == "Bajo"  # fuera de la prueba en vivo
+
+
+def test_single_day_warning_and_bad_week_with_non_finite():
+    assert single_day_warning(NAN) is None
+    assert single_day_warning(0.9, date(2026, 10, 14), NAN) == (
+        "Aviso: más de la mitad de la subida vino de un solo día (14-oct)."
+    )
+    text = bad_week_text(NAN)
+    assert "sin pérdidas" not in text and "faltan datos" in text
+
+
+def test_why_text_best_day_wording_between_half_and_threshold():
+    text = why_text(
+        "AVAX", ret_30d=0.2, momentum_pct=0.8, above_sma=ALL_SMA, median_qv=300 * M, best_share=0.55
+    )
+    assert "La subida está repartida" not in text
+    assert "Su mejor día aportó el 55 % de la subida." in text
+    assert "Aviso" not in text  # el aviso es solo por encima de 0,6 (apartado 10.2)
+
+
+def test_why_text_robust_to_missing_and_inconsistent_data():
+    text = why_text(
+        "DOT", ret_30d=NAN, momentum_pct=NAN, above_sma=ALL_SMA, median_qv=300 * M, p5=NAN
+    )
+    assert text.startswith("DOT: está por encima de sus medias de 20, 50 y 100 días.")
+    flat = why_text("TRX", ret_30d=0.0001, momentum_pct=0.5, above_sma=ALL_SMA, median_qv=M * 50)
+    assert flat.startswith("TRX: apenas cambia en 30 días, mejor que 50 de cada 100")
+    # Si baja en 30 días no hay «subida» que repartir ni aviso de un solo día.
+    down = why_text(
+        "ADA", ret_30d=-0.05, momentum_pct=0.3, above_sma=ALL_SMA, median_qv=M * 50, best_share=0.9
+    )
+    assert "subida" not in down
+
+
+def test_confidence_non_finite_excess_is_no_data():
+    assert confidence(True, NAN, "verde", "verde") == "SIN DATOS"
+    assert confidence(True, INF, "verde", "verde") == "SIN DATOS"
+    assert confidence(True, Decimal("0.01"), "verde", "verde") == "ALTA"
+    with pytest.raises(ValueError, match="desconocido"):
+        confidence_text("REGULAR")
+
+
+def test_crash_text_reproduces_the_mockup():
+    # Maqueta 10.1: valor 108,30 $, efectivo 12,40 $ → «perderías unos 41,40 $ (38 %)».
+    positions = {
+        "BTCUSDT": 32.75,
+        "SOLUSDT": 20.0,
+        "XRPUSDT": 15.0,
+        "SUIUSDT": 14.15,
+        "LINKUSDT": 14.0,
+    }
+    assert crash_text(positions, cash=12.40) == (
+        "Si mañana BTC y ETH cayeran un 30 % y el resto un 50 %, perderías unos 41,40 $ (38 %)."
+    )
+
+
+def test_coin_status_examples_of_section_10_3():
+    assert coin_status(
+        exclusion_reason="poco volumen, mediana de 1,2 M $ al día (mínimo 5 M $)"
+    ) == ("Fuera del universo: poco volumen, mediana de 1,2 M $ al día (mínimo 5 M $)")
+    assert coin_status(rank=23, n=84, score=61, trend_share=2 / 3) == (
+        "puesto 23 de 84; puntos 61; tendencia 2 de 3"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Asegúrate de comprar hoy.",  # con tilde
+        "GARANTÍZALO.",
+        "Esta moneda va a\nsubir.",  # salto de línea
+        "Es seguro que sube.",  # espacio duro
+        "La mas rentable del día.",  # sin tilde
+        "Lo pasado no garantiza lo futuro, pero esta va a subir.",
+    ],
+)
+def test_check_text_is_not_fooled_by_accents_or_spaces(text):
+    with pytest.raises(ValueError, match="prohibida"):
+        check_text(text)
+
+
+def test_check_text_ignores_empty_allowed_phrase():
+    with pytest.raises(ValueError):
+        check_text("va a subir", allowed=("",))
+    assert check_text("LO PASADO NO GARANTIZA\nLO FUTURO.") == "LO PASADO NO GARANTIZA\nLO FUTURO."

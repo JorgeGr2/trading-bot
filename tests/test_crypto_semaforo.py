@@ -174,7 +174,7 @@ def test_backtest_red_needs_enough_data():
         ({"excess_first_half": 0.0}, "B4"),
         ({"excess_second_half": None}, "B4"),
         ({"excess_2023_on": -0.02}, "B4"),
-        ({"null_percentile": 95.0}, "B5"),  # hay que **superar** el percentil 95
+        ({"null_percentile": 94.9}, "B5"),  # menos del 95 % de las carteras al azar debajo
         ({"null_percentile": 40.0}, "B5"),
         ({"signals_book_mean_excess": 0.0}, "B6"),
         ({"signals_book_ci_low": -0.001}, "B6"),
@@ -197,6 +197,72 @@ def test_backtest_missing_core_metric_is_never_green_nor_red():
     assert not by_id["BR1"].cumple
     assert by_id["BR1"].valor == "sin datos"
     assert MSG_PEOR_QUE_BTC not in mensajes
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"years_evaluable": 3.0},  # «menos de 3 años» es gris; 3 justos no
+        {"share_days_small_universe": 0.05},  # gris si es «más del 5 %»
+        {"coverage": 0.98},  # gris si «< 98 %»
+        {"delisted_pairs_in_universe": 1},
+        {"dsr": 0.95},  # B2: DSR ≥ 0,95
+        # B5: % de carteras al azar estrictamente por debajo. Con 950 de 1.000 debajo, el
+        # valor final supera al percentil 95 del nulo (la 950.ª menor): cumple, y el informe
+        # dice lo mismo («hace falta ≥ 95»).
+        {"null_percentile": 95.0},
+    ],
+)
+def test_backtest_thresholds_are_inclusive_where_the_spec_says_so(changes):
+    assert _bt_color(**changes) == VERDE
+
+
+def test_b5_threshold_matches_the_report_wording():
+    by_id = _by_id(backtest_light(replace(GOOD_BT, null_percentile=95.0))[1])
+    assert by_id["B5"].cumple
+    assert by_id["B5"].umbral.startswith("≥ 95 %")
+    assert by_id["B5"].valor == "mejor que el 95 % de las carteras al azar"
+    assert not _by_id(backtest_light(replace(GOOD_BT, null_percentile=94.9))[1])["B5"].cumple
+
+
+@pytest.mark.parametrize("value", [math.inf, -math.inf, math.nan])
+def test_non_finite_numbers_count_as_missing(value):
+    # Un infinito es un error de datos: ni cumple (no da el verde) ni pone en rojo.
+    color, criterios, _ = backtest_light(replace(GOOD_BT, excess_annual=value))
+    assert color == AMBAR
+    assert _by_id(criterios)["BR1"].valor == "sin datos"
+    bt = replace(GOOD_BT, ci_low_by_block={7: 0.02, 28: value, 56: 0.01})
+    assert not _by_id(backtest_light(bt)[1])["B1"].cumple
+    assert _live_color(cumulative_excess_ci_low_portfolio=value) == AMBAR
+
+
+def test_missing_data_reads_as_plain_sin_datos():
+    bt = replace(
+        GOOD_BT, max_drawdown=None, signals_book_mean_excess=None, signals_book_ci_low=None
+    )
+    by_id = _by_id(backtest_light(bt)[1])
+    assert by_id["BR3"].valor == "sin datos"
+    assert by_id["B6"].valor == "sin datos"
+    by_id = _by_id(backtest_light(replace(GOOD_BT, signals_book_ci_low=None))[1])
+    assert by_id["B6"].valor == "+0,6 % por operación (margen de error sin datos)"
+    live = replace(GOOD_LIVE, cumulative_excess_ci_low_signals=None)
+    v2 = _by_id(live_light(live, VERDE)[1])["V2"]
+    assert v2.valor == (
+        "revisión de hoy (4 de 13): cartera desde +3 %/año; libro de señales sin datos"
+    )
+    sem = _evaluate(bt=bt, live=live)
+    for c in sem.criterios:
+        assert "del sin datos" not in c.valor and "desde sin datos" not in c.valor, c
+
+
+def test_displayed_sign_never_contradicts_the_criterion():
+    # −0,04 % al año: pierde frente a BTC (ROJO) y el texto no puede decir «0 %».
+    color, criterios, _ = backtest_light(replace(GOOD_BT, excess_annual=-0.0004))
+    assert color == ROJO
+    assert _by_id(criterios)["BR1"].valor == "−0,04 %/año"
+    by_id = _by_id(backtest_light(replace(GOOD_BT, signals_book_ci_low=0.0004))[1])
+    assert by_id["B6"].cumple
+    assert by_id["B6"].valor == "+0,6 % por operación (margen de error desde +0,04 %)"
 
 
 def test_drawdown_thresholds_green_amber_red():
@@ -283,6 +349,21 @@ def test_live_gray_without_live_data():
 )
 def test_live_gray_when_samples_are_insufficient(changes):
     assert _live_color(**changes) == GRIS
+
+
+def test_live_green_at_the_exact_thresholds():
+    # Día 28 (1.ª revisión), 100 y 30 operaciones, brecha 2 veces y disponibilidad del 99 %.
+    live = replace(
+        GOOD_LIVE,
+        days=28,
+        review_number=1,
+        is_review_day=True,
+        signals_closed_trades=100,
+        portfolio_closed_trades=30,
+        mean_exec_gap_over_model=2.0,  # ROJO solo si es > 2 veces
+        availability=0.99,  # ROJO si < 99 %
+    )
+    assert live_light(live, VERDE)[0] == VERDE
 
 
 def test_live_gray_with_less_than_28_days_even_if_everything_else_passes():
@@ -545,6 +626,42 @@ def test_json_shape():
     assert b1["umbral"] == "límite inferior > 0 con L = 7, 28 y 56"
     assert b1["cumple"] is True
     assert {data["semaforo"], *data["luces"].values()} <= {VERDE, AMBAR, ROJO, GRIS}
+
+
+def test_b1_text_matches_the_json_example_of_section_9_3():
+    bt = replace(
+        GOOD_BT,
+        ci_low_by_block={7: -0.05, 28: -0.06, 56: -0.04},
+        ci_high_by_block={7: 0.22, 28: 0.25, 56: 0.24},
+    )
+    color, criterios, _ = backtest_light(bt)
+    assert color == AMBAR
+    b1 = _by_id(criterios)["B1"].as_dict()
+    assert b1 == {
+        "id": "B1",
+        "texto": "Gana a BTC por un margen que no parece suerte",
+        "valor": "+9 %/año (margen de error: −6 % a +25 %)",
+        "umbral": "límite inferior > 0 con L = 7, 28 y 56",
+        "cumple": False,
+    }
+
+
+def test_b1_needs_every_lower_bound_above_zero_whatever_the_upper_bounds():
+    highs = {7: 0.3, 28: 0.3, 56: 0.3}
+    bt = replace(GOOD_BT, ci_low_by_block={7: 0.02, 28: 0.01, 56: 0.0}, ci_high_by_block=highs)
+    b1 = _by_id(backtest_light(bt)[1])["B1"]
+    assert not b1.cumple
+    assert b1.valor == "+9 %/año (margen de error: 0 % a +30 %)"
+
+
+def test_dias_necesarios_is_a_whole_number_of_days():
+    assert _evaluate(live=replace(GOOD_LIVE, min_trl_days=1399.2)).dias_necesarios == 1400
+    assert _evaluate(live=replace(GOOD_LIVE, min_trl_days=math.inf)).dias_necesarios is None
+    assert _evaluate(live=replace(GOOD_LIVE, min_trl_days=None)).dias_necesarios is None
+    assert (
+        '"dias_necesarios":1400,'
+        in _evaluate(live=replace(GOOD_LIVE, min_trl_days=1399.2)).to_json()
+    )
 
 
 def test_spanish_number_format():

@@ -48,8 +48,15 @@ class StrategyParams:
     signals_book_days: int = 7
 
     def params_hash(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, default=str)
+        payload = json.dumps(asdict(self), sort_keys=True, default=_canonical)
         return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _canonical(value: object) -> object:
+    """Conjuntos ordenados (su orden no puede cambiar la huella)."""
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    return str(value)
 
 
 STRATEGY_V1 = StrategyParams()

@@ -1,23 +1,52 @@
 """Órdenes del bot de cripto (Binance, solo simulación).
 
-copybot crypto sync [--since 2019-01-01]   descarga pares y velas diarias (lo que falte)
+copybot crypto sync [--since 2017-07-01]   descarga pares y velas diarias (lo que falte)
+copybot crypto costs calibrate | show      fotos del libro (bid/ask) y comparación con la tabla
+copybot crypto prereg check                el código coincide con el preregistro
+copybot crypto backtest [--until D] [--seed 7] [--null 1000] [--out F]
+                                           backtest de la regla v1 (siempre se registra)
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
-from copybot.config import Settings
+from copybot.backtest import stats
+from copybot.config import RiskLimits, Settings
+from copybot.crypto import btreport
+from copybot.crypto.backtest import deflated, run_backtest
 from copybot.crypto.binance import BinanceMarket
+from copybot.crypto.calibration import calibration_report, calibration_snapshot
+from copybot.crypto.panel import load_panel
+from copybot.crypto.registry import (
+    code_commit,
+    config_of,
+    k_count,
+    prereg_check,
+    record_run,
+)
+from copybot.crypto.strategy import STRATEGY_V1, VARIANTS
 from copybot.crypto.sync import HISTORY_START, sync_all
+from copybot.db.models import CryptoBacktestRun
 from copybot.db.session import make_engine, make_sessionmaker
 
 
 def add_parsers(sub: argparse._SubParsersAction) -> None:
     crypto = sub.add_parser("crypto", help="bot de cripto en Binance (simulado)")
     csub = crypto.add_subparsers(dest="action", required=True)
+    pre = csub.add_parser("prereg", help="comprobar el preregistro de la regla")
+    pre.add_argument("prereg_action", choices=["check"])
+    bt = csub.add_parser("backtest", help="backtest de la regla v1 (se registra siempre)")
+    bt.add_argument("--until", type=date.fromisoformat, help="último día (por defecto, ayer)")
+    bt.add_argument("--seed", type=int, default=7)
+    bt.add_argument("--null", type=int, default=1000, help="carteras al azar del nulo")
+    bt.add_argument("--out", help="guardar el informe en este fichero")
+    cost = csub.add_parser("costs", help="calibrar los costes con el libro de Binance")
+    cost.add_argument("costs_action", choices=["calibrate", "show"])
     sync = csub.add_parser("sync", help="descargar pares y velas diarias de Binance")
     sync.add_argument(
         "--since",
@@ -33,9 +62,29 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     try:
         if args.action == "sync":
             return await _sync(args, sessions)
+        if args.action == "costs":
+            return await _costs(args, sessions)
+        if args.action == "prereg":
+            problems = prereg_check()
+            for p in problems:
+                print(f"✗ {p}")
+            print("El código coincide con el preregistro." if not problems else "")
+            return 0 if not problems else 1
+        if args.action == "backtest":
+            return await _backtest(args, sessions)
     finally:
         await engine.dispose()
     return 2
+
+
+async def _costs(args: argparse.Namespace, sessions) -> int:
+    if args.costs_action == "calibrate":
+        async with BinanceMarket() as market:
+            taken, n = await calibration_snapshot(sessions, market)
+        print(f"Foto del libro guardada ({n} pares, {taken:%Y-%m-%d %H:%M} UTC).")
+    cal = await calibration_report(sessions)
+    print(cal)
+    return 0
 
 
 async def _sync(args: argparse.Namespace, sessions) -> int:
@@ -50,4 +99,78 @@ async def _sync(args: argparse.Namespace, sessions) -> int:
         f"nuevas: {result.bars:,} en {result.updated_symbols} pares. Peticiones: "
         f"{result.requests}."
     )
+    return 0
+
+
+async def _backtest(args: argparse.Namespace, sessions) -> int:
+    problems = prereg_check()
+    if problems:
+        print("No se ejecuta: el código no coincide con el preregistro.", file=sys.stderr)
+        for p in problems:
+            print(f"  ✗ {p}", file=sys.stderr)
+        return 1
+    end = args.until or (datetime.now(UTC).date() - timedelta(days=1))
+    limits = RiskLimits.model_construct()  # topes del código, sin el entorno ni .env
+
+    def say(message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
+    say("Cargando velas…")
+    panel = await load_panel(sessions, end=end)
+    r = run_backtest(
+        panel, end=end, limits=limits, seed=args.seed, null_seeds=args.null, progress=say
+    )
+    period = (r.start, r.end)
+    common = {"period": period, "data_hash": r.data_hash, "seed": args.seed, "n_days": len(r.days)}
+    ex = r.excess_a
+    principal_id = await record_run(
+        sessions,
+        cfg=config_of(STRATEGY_V1, curva="A"),
+        role="principal",
+        sr_daily=ex.sr_daily,
+        skew=ex.skew,
+        kurt=ex.kurt,
+        metrics={"exceso_anual": ex.annual, "final": r.curve_a.final},
+        **common,
+    )
+    for key, params in VARIANTS.items():
+        e = r.excess_variants[key]
+        await record_run(
+            sessions,
+            cfg=config_of(params, curva="A"),
+            role="variante",
+            sr_daily=e.sr_daily,
+            skew=e.skew,
+            kurt=e.kurt,
+            metrics={"exceso_anual": e.annual, "final": r.variants[key].final},
+            **common,
+        )
+    for key, run in r.stress.items():
+        e = r.excess_stress[key]
+        await record_run(
+            sessions,
+            cfg=config_of(STRATEGY_V1, curva="A", estres=key),
+            role="estres",
+            sr_daily=e.sr_daily,
+            skew=e.skew,
+            kurt=e.kurt,
+            metrics={"exceso_anual": e.annual, "final": run.final},
+            **common,
+        )
+    k = await k_count(sessions)
+    dsr = deflated(r, k)
+    trl = (
+        stats.min_trl(ex.sr_daily, ex.skew, ex.kurt, 1.96)
+        if ex.sr_daily and ex.sr_daily > 0 and ex.skew is not None and ex.kurt is not None
+        else None
+    )
+    text = btreport.render(r, k=k, dsr=dsr, min_trl=trl, commit=code_commit())
+    async with sessions.begin() as s:
+        row = await s.get(CryptoBacktestRun, principal_id)
+        if row is not None:
+            row.report_md = text
+    if args.out:
+        await asyncio.to_thread(Path(args.out).write_text, text, encoding="utf-8")
+        say(f"Informe guardado en {args.out}")
+    print(text)
     return 0

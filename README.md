@@ -1,15 +1,42 @@
 # trading-bot
 
-Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
+Bot de trading de **cripto en Binance**, **simulado**: cada día analiza el mercado,
+ordena las monedas con una regla fija y lleva una cartera de prueba con dinero ficticio.
 
-> **Estado:** Fase 5 (backtester: qué habría pasado copiando, frente a otras
-> inversiones), pendiente de aprobación; resultados en el informe de la Fase 5.
-> El proyecto solo simula: no maneja claves privadas, no firma transacciones y no envía
-> órdenes. Un test impide añadir ese tipo de código. El modo con dinero real solo se
-> planteará si la simulación cumple los criterios fijados de antemano (apartado 12 del
-> informe de la Fase 1).
+> **Estado:** regla `cripto-v1` programada y probada; pendiente del primer backtest con
+> datos reales (se publicará tal como salga) y del arranque de la cartera de prueba.
+> El proyecto solo simula: usa datos públicos de mercado, no maneja claves de exchange,
+> no firma ni envía órdenes. Un test impide añadir ese tipo de código. Usar dinero real
+> solo se planteará si la regla supera los criterios fijados de antemano.
+>
+> **Nadie puede saber qué moneda subirá más mañana.** El bot dice cuál es la mejor
+> puntuada **según su regla**, y enseña cómo le fue a esa regla antes y en vivo.
+
+## Qué hace
+
+- **Descarga las velas diarias** de todos los pares contra USDT de Binance desde 2017,
+  también los de monedas ya retiradas (para no ver solo a las supervivientes).
+- **Analiza el mercado cada día** con la vela cerrada: qué monedas se pueden evaluar (liquidez,
+  antigüedad, calidad de datos; sin estables ni tokens apalancados), su puntuación de 0 a
+  100 por la fuerza de su subida ajustada por lo que suelen moverse (7 a 90 días), su
+  tendencia y el estado del mercado (BTC frente a su media de 100 días). Escribe el informe
+  «Análisis del mercado» en castellano.
+- **Cartera de prueba** de 100 $ ficticios: tiene las 5 mejores con tendencia (18 $ cada
+  una), vende si bajan del puesto 12, pierden la tendencia, caen un 25 % o el mercado se
+  vuelve bajista (todo a USDT). Ejecuta al precio real del libro de Binance (compra al ask,
+  vende al bid) con comisiones. Puedes lanzar una prueba con la duración que quieras.
+- **Backtest** de la misma regla desde 2017 frente a comprar BTC y mantener, BTC con el
+  mismo filtro, las 10 más negociadas y 1.000 carteras al azar, con costes calibrados,
+  pruebas de estrés y estadística honesta. Semáforo «¿Es rentable?» con criterios fijados
+  antes de ver resultados.
 
 ## Documentación
+
+- Bot de cripto: diseño aprobado [`docs/cripto/diseno.md`](docs/cripto/diseno.md) y
+  preregistro de la regla [`docs/cripto/preregistro-v1.md`](docs/cripto/preregistro-v1.md).
+
+Fases anteriores (laboratorio de copy-trading de memecoins en Solana, abandonado porque
+copiar con retraso perdía dinero):
 
 - Fase 1 (investigación, arquitectura, presupuesto y criterios para usar dinero real):
   [`docs/fase-1-investigacion.md`](docs/fase-1-investigacion.md)
@@ -22,41 +49,25 @@ Laboratorio de análisis y copy-trading **simulado** de memecoins en Solana.
 - Informe de la Fase 5 (backtest fuera de muestra del copy-trading frente a SOL, BTC,
   ETH y el S&P 500 tokenizado): [`docs/informes/fase-5.md`](docs/informes/fase-5.md)
 
-## Qué hace ahora mismo
+## Uso
 
-- **Sigue wallets de Solana en vivo** y guarda cada transacción en PostgreSQL. Si se corta
-  la conexión, recupera después lo que se haya perdido.
-- **Clasifica cada transacción** como compra, venta, transferencia o ambigua, con un nivel
-  de confianza. La autoría se deduce de quién cambia de saldo, no de quién paga la
-  comisión. En FOMO, la comisión la paga siempre una wallet de la propia FOMO.
-- **Descubre traders de FOMO** muestreando lo que firma su relayer (también los que
-  operan poco, con un filtro de actividad barato) o a partir de direcciones que le
-  pases (por ejemplo, de la leaderboard de FOMO), **importa su historial** y **calcula
-  sus métricas**: rentabilidad por operación, acierto, tiempo hasta vender, caídas,
-  posiciones abandonadas (valoradas a su precio de venta), concentración del
-  beneficio, compras en el lanzamiento del token…
-- **Puntúa a cada trader** de 0 a 100 con una explicación en texto, o lo excluye diciendo
-  por qué. Cada cálculo se guarda con su fecha (`as_of`) y la versión de sus parámetros,
-  y nunca usa información posterior a esa fecha.
+```bash
+uv run copybot crypto sync                  # descargar velas nuevas de Binance
+uv run copybot crypto analyze --day 2026-10-20   # análisis de un día pasado
+uv run copybot crypto coin PEPE             # por qué una moneda está o no, y su puesto
+uv run copybot crypto backtest --out bt.md  # backtest de la regla (se registra siempre)
+uv run copybot crypto daily                 # paso diario completo, una vez
+uv run copybot crypto run                   # servicio: el paso diario a las 00:10 UTC
+uv run copybot crypto today                 # último informe diario
+uv run copybot crypto paper start --days 28 # lanzar una prueba de 28 días
+uv run copybot crypto paper status | pause | resume | stop
+uv run copybot crypto costs calibrate       # foto del libro para calibrar costes
+uv run copybot crypto prereg check          # el código coincide con lo registrado
+```
 
-- **Simula el copy-trading en vivo, sin dinero real.** Cada compra de un trader seguido
-  pasa por filtros del token y del mercado y por los límites de riesgo. Después se
-  «ejecuta» con cotizaciones reales de Jupiter: latencia, slippage, MEV, comisiones y
-  renta de la cuenta de token. Lleva dos libros: la cartera de 100 $ con todos los
-  límites y un libro que copia cada señal con 10 $ para medir su calidad. Copia las
-  ventas del trader en la misma proporción y tiene stop-loss, venta a las 48 h, parada
-  automática por pérdidas y modo de solo lectura si el monitor deja de dar datos.
+Necesita PostgreSQL (`COPYBOT_DATABASE_URL`) y acceso a `data-api.binance.vision`.
 
-- **Backtest del copy-trading** (resultados estimados, aparte de la simulación en vivo).
-  Cada semana elige a los traders con ventaja usando solo datos anteriores y copia sus
-  operaciones de la semana siguiente al precio real que había 4-8 s después (de las
-  operaciones de otros usuarios, vía Helius), con todos los costes. Lo compara con
-  comprar y mantener, comprar cada semana o seguir la tendencia de SOL, BTC, ETH y el
-  S&P 500 tokenizado (SPYx), con el mismo dinero. Mismo informe con los mismos datos.
-
-Todavía no tiene interfaz gráfica ni bot de Telegram. Eso llega en las fases siguientes.
-
-## Uso para desarrolladores
+## Uso para desarrolladores (laboratorio de memecoins, fases 2-5)
 
 Requisitos: Python 3.12+, [uv](https://docs.astral.sh/uv/) y PostgreSQL 16. El
 descubrimiento y la importación de historiales necesitan una clave de Helius

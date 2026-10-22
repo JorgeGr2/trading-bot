@@ -1,7 +1,7 @@
 [project]
 name = "copybot"
 version = "0.1.0"
-description = "Laboratorio de análisis y copy-trading simulado de memecoins en Solana (solo simulación)"
+description = "Bot de trading de cripto en Binance, simulado: análisis diario, backtest y cartera de prueba (solo simulación)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

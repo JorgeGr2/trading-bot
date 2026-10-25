@@ -102,9 +102,15 @@ def excess_vs(curve, bench, *, seed: int = 7, resamples: int = 5000) -> Excess:
     )
 
 
-def max_drawdown(curve) -> float:
+def max_drawdown(curve, worst_curve=None) -> float:
+    """Caída máxima: el pico se toma del patrimonio al cierre (E) y el valle, del peor
+    momento del día (W) si se da; así no se infravalora la caída (diseño 8.4)."""
+    lows = dict(worst_curve) if worst_curve else {}
     peak, worst = 0.0, 0.0
-    for _, v in curve:
+    for d, v in curve:
+        low = min(v, lows.get(d, v))
+        if peak > 0:
+            worst = max(worst, 1 - low / peak)
         peak = max(peak, v)
         if peak > 0:
             worst = max(worst, 1 - v / peak)
@@ -121,7 +127,7 @@ def curve_metrics(curve, worst_curve=None) -> dict:
     dd_sd = math.sqrt(sum(r * r for r in down) / len(rets)) if rets else 0.0
     mean = statistics.fmean(rets) if rets else 0.0
     cagr = (1 + total) ** (1 / years) - 1 if total > -1 else -1.0
-    mdd = max_drawdown(worst_curve or curve)
+    mdd = max_drawdown(curve, worst_curve)
     months: dict[tuple[int, int], list[float]] = defaultdict(list)
     for d, v in curve:
         months[(d.year, d.month)].append(v)

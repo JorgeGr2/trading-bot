@@ -68,3 +68,16 @@ def test_report_and_semaforo_render_without_promises():
     )
     check_text(text)
     assert "Backtest de la regla cripto-v1" in text and "Semáforo" in text
+
+
+def test_max_drawdown_uses_close_peak_and_intraday_trough():
+    from datetime import date
+
+    from copybot.crypto.backtest import max_drawdown
+
+    d = [date(2024, 1, k) for k in (1, 2, 3)]
+    closes = [(d[0], 100.0), (d[1], 120.0), (d[2], 110.0)]
+    lows = [(d[0], 100.0), (d[1], 90.0), (d[2], 84.0)]
+    # Pico de E = 120 (día 2); peor W después = 84 → 30 %. Con el pico de W saldría 16 %.
+    assert abs(max_drawdown(closes, lows) - 0.30) < 1e-12
+    assert abs(max_drawdown(closes) - 1 / 12) < 1e-12

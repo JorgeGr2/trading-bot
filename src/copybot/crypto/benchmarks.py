@@ -118,32 +118,26 @@ def top10_basket(
     mult: float = 1.0,
 ) -> Benchmark:
     """Las 10 más líquidas del universo, a partes iguales, reequilibradas cada ``every``
-    días (decisión al cierre, ejecución en la apertura siguiente)."""
+    días (decisión al cierre, ejecución en la apertura siguiente). Se reequilibra por
+    diferencia (solo se vende lo que sobra y se compra lo que falta) y cada moneda paga
+    el coste del tramo de su propia mediana de volumen."""
     cash = initial
     held: dict[str, float] = {}
     last_close: dict[str, float] = {}
     last_seen: dict[str, date] = {}
-    pending: list[str] | None = None
+    pending: tuple[list[str], dict[str, float]] | None = None
     curve = []
     for k, day in enumerate(days):
         if pending is not None:
-            for symbol in list(held):
-                price = _open(panel, symbol, day)
-                if price is not None:
-                    cash += costs.sell_usd(held.pop(symbol), price, 1e8, mult)
-            budget = cash / max(len(pending), 1)
-            for symbol in pending:
-                price = _open(panel, symbol, day)
-                if price is not None and budget >= 1:
-                    held[symbol] = held.get(symbol, 0.0) + costs.buy_qty(budget, price, 1e8, mult)
-                    last_close.setdefault(symbol, price)
-                    last_seen.setdefault(symbol, day)
-                    cash -= budget
+            cash = _rebalance(panel, day, held, cash, last_close, *pending, mult)
+            for symbol in held:
+                last_close.setdefault(symbol, _open(panel, symbol, day) or 0.0)
+                last_seen.setdefault(symbol, day)
             pending = None
         for symbol, qty in list(held.items()):
             series = panel.series[symbol]
             i = series.at(day)
-            if i is not None:
+            if i is not None and series.traded(i):
                 last_close[symbol], last_seen[symbol] = series.close[i], day
             elif (day - last_seen.get(symbol, day)).days >= 7:  # retirada
                 cash += qty * last_close.get(symbol, 0.0) * DELISTED_HAIRCUT
@@ -152,8 +146,52 @@ def top10_basket(
         curve.append((day, value))
         view = views.get(day)
         if view is not None and k % every == 0:
-            pending = [m.symbol for m in view.universe.members[:10]]
+            members = view.universe.members
+            qv = {m.symbol: m.median_quote_volume for m in members}
+            pending = ([m.symbol for m in members[:10]], qv)
     return Benchmark("cesta10", "Cesta de las 10 más negociadas", curve)
+
+
+def _rebalance(
+    panel: Panel,
+    day: date,
+    held: dict[str, float],
+    cash: float,
+    last_close: dict[str, float],
+    targets: list[str],
+    qv: dict[str, float],
+    mult: float,
+) -> float:
+    """Lleva la cesta al mismo peso en la apertura de ``day`` vendiendo solo lo que sobra y
+    comprando lo que falta. Una moneda sin negociación ese día no se toca (cuenta en el
+    total a su último cierre). Devuelve el efectivo; ``held`` se actualiza en el sitio."""
+    opens = {s: _open(panel, s, day) for s in sorted(set(held) | set(targets))}
+    prices = {s: p for s, p in opens.items() if p is not None}
+    value = cash + sum(q * prices.get(s, last_close.get(s, 0.0)) for s, q in held.items())
+    goal = value / max(len(targets), 1)
+    for symbol in sorted(held):  # primero las ventas: lo que sale y lo que sobra
+        price = prices.get(symbol)
+        if price is None:
+            continue
+        extra = held[symbol] - (goal / price if symbol in targets else 0.0)
+        if extra > 1e-12:
+            cash += costs.sell_usd(extra, price, qv.get(symbol), mult)
+            held[symbol] -= extra
+            if symbol not in targets:
+                del held[symbol]
+    # Después las compras: lo que falta a cada una (con los costes de las ventas no llega
+    # del todo: se reparte en proporción).
+    wants = {s: goal - held.get(s, 0.0) * prices[s] for s in targets if s in prices}
+    wants = {s: w for s, w in wants.items() if w > 1e-9}
+    need = sum(wants.values())
+    scale = min(1.0, cash / need) if need > 0 else 0.0
+    for symbol in sorted(wants):
+        usd = wants[symbol] * scale
+        if usd > 0:
+            qty = costs.buy_qty(usd, prices[symbol], qv.get(symbol), mult)
+            held[symbol] = held.get(symbol, 0.0) + qty
+            cash -= usd
+    return cash
 
 
 def daily_returns(curve: Curve) -> list[float]:

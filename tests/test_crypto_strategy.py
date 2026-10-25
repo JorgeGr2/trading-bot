@@ -159,6 +159,37 @@ def test_random_books_never_break_the_caps():
             assert cash + proceeds - spent >= 10 - 1e-9  # la reserva del 10 % del capital
 
 
+def test_percent_mode_keeps_the_same_reserve_as_the_null():
+    """Curva A y nulo aleatorio con la misma regla de huecos y reserva (el 10 % de E en
+    modo porcentaje, apartado 6.2): con 25 $ de efectivo y E = 100 $ no cabe una compra de
+    18 $ sin tocar la reserva de 10 $; con 30 $ (E = 105 $) cabe una."""
+    from copybot.crypto.engine import random_chooser
+
+    holdings = {s: held(s, qty=2.5) for s in ("C10USDT", "C11USDT", "C12USDT")}  # 75 $
+    for cash, buys in ((25.0, 0), (30.0, 1), (100.0, 2)):
+        b = book(cash=cash, holdings=holdings, prev=cash + 75, peak=cash + 75)
+        d = decide(view(COINS), b, STRATEGY_V1, LIMITS, mode="porcentaje")
+        assert len(d.buys) == buys
+        null = random_chooser(1, [7], STRATEGY_V1, LIMITS)(view(COINS), d, b)
+        assert len(null.buys) == buys
+
+
+def test_pending_orders_count_as_held():
+    """Órdenes decididas y aún sin ejecutar (un día de retraso): las compras ocupan hueco
+    y efectivo, y lo que ya se está vendiendo no se vuelve a vender."""
+    holdings = {"C13USDT": held("C13USDT")}  # puesto 13: toca venderla
+    pending = {s: 18.0 for s in ("C7USDT", "C8USDT", "C9USDT")}
+    b = book(cash=100, holdings=holdings, pending_buys=pending)
+    d = decide(view(COINS), b, STRATEGY_V1, LIMITS)
+    assert [o.symbol for o in d.sells] == ["C13USDT"]
+    assert [o.symbol for o in d.buys] == ["C1USDT", "C2USDT"]  # 5 − 3 pendientes
+    # Una venta pendiente cuenta como vendida (hueco y efectivo), pero no se repite.
+    b2 = book(cash=100, holdings=holdings, pending_sells=frozenset({"C13USDT"}))
+    d2 = decide(view(COINS), b2, STRATEGY_V1, LIMITS)
+    same_day = decide(view(COINS), book(cash=100, holdings=holdings), STRATEGY_V1, LIMITS)
+    assert not d2.sells and d2.buys == same_day.buys and len(d2.buys) == 4
+
+
 def test_params_are_frozen():
     assert STRATEGY_V1.params_hash() == STRATEGY_V1.params_hash()
     assert VARIANTS["V2"].params_hash() != STRATEGY_V1.params_hash()

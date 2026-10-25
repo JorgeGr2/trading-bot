@@ -65,7 +65,13 @@ def render(
         out += ["**En el pasado, esta regla lo hizo peor que comprar BTC y esperar.**", ""]
     out += [
         f"- Periodo: {r.start:%d-%m-%Y} → {r.end:%d-%m-%Y} ({len(r.days)} días). Empieza el "
-        f"primer día con al menos 20 monedas evaluables.",
+        f"primer día con al menos 20 monedas evaluables"
+        + (
+            f"; termina con la última vela de BTC (se pidió hasta el "
+            f"{r.requested_end:%d-%m-%Y}, pero los datos no llegan)."
+            if r.requested_end is not None
+            else "."
+        ),
         f"- Monedas evaluables por día: mediana {statistics.median(sizes):.0f} "
         f"(de {min(sizes)} a {max(sizes)}).",
         "- **Pseudo-fuera de muestra:** los parámetros no se ajustaron a estos datos, pero "
@@ -199,7 +205,7 @@ def _null(r: BacktestResult) -> list[str]:
         return []
     finals = sorted(r.null_finals)
     p95 = finals[int(0.95 * (len(finals) - 1))]
-    return [
+    out = [
         "",
         "## ¿Elegir moneda aporta algo?",
         "",
@@ -208,6 +214,16 @@ def _null(r: BacktestResult) -> list[str]:
         f"Mediana al azar: {usd(statistics.median(finals))}; percentil 95: {usd(p95)}; "
         f"regla: {usd(r.curve_a.final)}.",
     ]
+    if r.null_sharpes:
+        sharpe = curve_metrics(r.curve_a.curve)["sharpe"]
+        median = statistics.median(r.null_sharpes)
+        out += [
+            "",
+            f"Por Sharpe (rentabilidad por unidad de riesgo), la regla queda mejor que el "
+            f"{num(r.null_sharpe_percentile, 0)} % de las carteras al azar. Sharpe de la "
+            f"regla: {num(sharpe, 2)}; mediana al azar: {num(median, 2)}.",
+        ]
+    return out
 
 
 def _signals(r: BacktestResult) -> list[str]:
@@ -301,6 +317,17 @@ def _trades(r: BacktestResult) -> list[str]:
         "retirada": "retirada de Binance",
     }
     years = max(len(r.days), 1) / 365
+    ci = r.trades_ci
+    by_week = (
+        [
+            f"- Rentabilidad media por operación: {pct(ci['media'], 2)} (margen de error "
+            f"{pct(ci['ic'][0], 2)} a {pct(ci['ic'][1], 2)}, bootstrap por grupos de las "
+            f"{ci['semanas']} semanas de entrada: las de una misma semana no son "
+            "independientes)."
+        ]
+        if "ic" in ci
+        else []
+    )
     return [
         "",
         "## Operaciones (método)",
@@ -308,6 +335,7 @@ def _trades(r: BacktestResult) -> list[str]:
         f"- {len(closed)} cerradas ({num(len(closed) / years, 0)} al año); duración mediana "
         f"{statistics.median(days_held):.0f} días; aciertos "
         f"{pct(sum(1 for t in closed if t.pnl > 0) / len(closed), 0, sign=False)}.",
+        *by_week,
         "- Motivos de salida: "
         + ", ".join(f"{names.get(k, k)} {v}" for k, v in purposes.most_common())
         + ".",

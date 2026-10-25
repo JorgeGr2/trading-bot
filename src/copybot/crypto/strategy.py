@@ -107,12 +107,15 @@ def regime(panel: Panel, day: date, p: StrategyParams) -> Regime | None:
 
 
 def day_view(panel: Panel, day: date, p: StrategyParams = STRATEGY_V1) -> DayView:
+    """Vista del día. Una vela con 0 operaciones cuenta como día sin negociación (apartado
+    3.5): no entra en ``close`` ni en ``low``, así que la posición se valora al último
+    cierre × 0,90 y no se puede vender, igual que con un hueco."""
     u = universe(panel, day, p.universe)
     ranked = ranked_day(panel, day, [m.symbol for m in u.members], p.signals)
     close, low = {}, {}
     for series in panel.series.values():
         i = series.at(day)
-        if i is not None:
+        if i is not None and series.traded(i):
             close[series.symbol] = series.close[i]
             low[series.symbol] = series.low[i]
     return DayView(day, u, ranked, regime(panel, day, p), close, low)
@@ -137,6 +140,10 @@ class BookView:
     halted_risk: bool = False  # parada por caída del 50 % (solo se reanuda a mano)
     paused: bool = False
     blocked: frozenset[str] = frozenset()  # bloqueadas en vivo (diferencial, estado…)
+    # Órdenes ya decididas que aún no se han ejecutado (backtest con un día de retraso):
+    # las compras ocupan hueco y apartan su importe; las ventas ya no cuentan como cartera.
+    pending_buys: dict[str, float] = field(default_factory=dict)  # símbolo → importe
+    pending_sells: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -202,6 +209,61 @@ def size_usd(equity: float, p: StrategyParams, limits: RiskLimits, mode: str) ->
     return math.floor(max(raw, 0.0) * 100) / 100
 
 
+def cash_reserve(
+    equity: float, book: BookView, p: StrategyParams, limits: RiskLimits, mode: str
+) -> float:
+    """Efectivo que no se invierte (apartado 6.2). Modo «porcentaje»: el 10 % de E(t), el
+    mismo que descuenta el tamaño. Modo «dólares»: ``min_cash_reserve_pct`` del capital
+    inicial (10 $ con 100 $), el mismo que comprueba ``entry_rejections``."""
+    if mode == "porcentaje":
+        return equity * p.reserve_pct / 100
+    return book.initial * float(limits.min_cash_reserve_pct) / 100
+
+
+@dataclass(frozen=True)
+class BuyRoom:
+    """Sitio para comprar hoy, después de las ventas de hoy y de las órdenes pendientes."""
+
+    open_symbols: frozenset[str]  # posiciones que quedan, con las compras pendientes
+    slots: int  # huecos hasta N
+    cash: float  # con las ventas estimadas y sin el importe de las compras pendientes
+    reserve: float
+
+    def fits(self, size: float) -> int:
+        """Cuántas compras de ``size`` caben sin pasar de N ni tocar la reserva."""
+        if size <= 0:
+            return 0
+        by_cash = math.floor((self.cash - self.reserve) / size + 1e-9)
+        return max(0, min(self.slots, by_cash))
+
+
+def buy_room(
+    view: DayView,
+    book: BookView,
+    sold: set[str],
+    equity: float,
+    p: StrategyParams,
+    limits: RiskLimits,
+    mode: str,
+) -> BuyRoom:
+    """La regla de huecos y reserva: la misma en ``decide()`` y en el nulo aleatorio.
+
+    Las ventas de hoy y las pendientes se ejecutan antes que estas compras: dejan hueco y
+    su importe (estimado con el cierre y un coste prudente) ya cuenta como efectivo. Las
+    compras pendientes ocupan hueco y su importe ya no está disponible."""
+    leaving = sorted(set(sold) | (book.pending_sells & set(book.holdings)))
+    proceeds = sum(
+        book.holdings[s].qty * view.close[s] * (1 - SELL_COST_ESTIMATE)
+        for s in leaving
+        if s in view.close
+    )
+    cash = book.cash + proceeds - sum(book.pending_buys[s] for s in sorted(book.pending_buys))
+    open_symbols = frozenset((set(book.holdings) - set(leaving)) | set(book.pending_buys))
+    n = min(p.n_positions, limits.max_open_positions)
+    reserve = cash_reserve(equity, book, p, limits, mode)
+    return BuyRoom(open_symbols, n - len(open_symbols), cash, reserve)
+
+
 def decide(
     view: DayView,
     book: BookView,
@@ -234,6 +296,8 @@ def decide(
 
     # --- Ventas: el primer motivo que se cumpla ------------------------------------------
     for h in sorted(book.holdings.values(), key=lambda h: h.symbol):
+        if h.symbol in book.pending_sells:
+            continue  # ya tiene una venta decidida que aún no se ha ejecutado
         close = view.close.get(h.symbol)
         if close is None:
             continue  # sin vela hoy: no se puede vender (lo resuelve la regla de retiradas)
@@ -264,30 +328,20 @@ def decide(
     can_buy = favorable is True and not halts and not book.halted_risk and not book.paused
     if can_buy:
         size = size_usd(equity, p, limits, mode)
-        n = min(p.n_positions, limits.max_open_positions)
-        holes = n - (len(book.holdings) - len(sold))
-        # Las ventas se ejecutan antes que las compras: su importe (estimado con el cierre
-        # y un coste prudente) ya cuenta como efectivo para comprar.
-        cash = book.cash + sum(
-            book.holdings[s].qty * view.close[s] * (1 - SELL_COST_ESTIMATE) for s in sold
-        )
-        open_now = len(book.holdings) - len(sold)
+        room = buy_room(view, book, sold, equity, p, limits, mode)
+        holes = room.fits(size) if size >= MIN_ORDER_USD else 0
+        cash, open_now = room.cash, room.open_symbols
+        # Sin recompra el mismo día, ni de lo que ya se tiene o se va a comprar.
+        skip = sold | book.blocked | set(book.holdings) | set(book.pending_buys)
         for sig in view.ranked:
             if holes <= 0 or sig.rank > p.entry_rank:
                 break
-            if sig.symbol in book.holdings or sig.symbol in sold or sig.symbol in book.blocked:
-                continue
-            if sig.trend_share + 1e-9 < p.entry_trend or size < MIN_ORDER_USD:
+            if sig.symbol in skip or sig.trend_share + 1e-9 < p.entry_trend:
                 continue
             check = replace(
-                state,
-                cash_usd=_d(cash),
-                open_positions=open_now,
-                open_mints=frozenset(set(book.holdings) - sold),
+                state, cash_usd=_d(cash), open_positions=len(open_now), open_mints=open_now
             )
             if mode == "dolares" and entry_rejections(check, sig.symbol, _d(size), limits):
-                continue
-            if size > cash + 1e-9:
                 continue
             orders.append(
                 Order(
@@ -301,7 +355,7 @@ def decide(
                 )
             )
             cash -= size
-            open_now += 1
+            open_now = open_now | {sig.symbol}
             holes -= 1
     return Decision(view.day, equity, worst, orders, halts, favorable, size)
 

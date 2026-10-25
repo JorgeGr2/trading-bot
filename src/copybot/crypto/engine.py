@@ -22,13 +22,14 @@ from copybot.crypto import costs
 from copybot.crypto.panel import Panel
 from copybot.crypto.strategy import (
     DELISTED_HAIRCUT,
-    SELL_COST_ESTIMATE,
+    MIN_ORDER_USD,
     BookView,
     DayView,
     Decision,
     Holding,
     Order,
     StrategyParams,
+    buy_room,
     day_view,
     decide,
 )
@@ -130,7 +131,7 @@ def simulate(
     cfg: RunConfig,
     *,
     keep_decisions: bool = False,
-    chooser: Callable[[DayView, Decision, _Book], Decision] | None = None,
+    chooser: Callable[[DayView, Decision, BookView], Decision] | None = None,
 ) -> RunResult:
     """Simula la regla entre ``days[0]`` y ``days[-1]``. ``chooser`` permite sustituir
     las compras (el nulo aleatorio) sin tocar el resto."""
@@ -160,6 +161,9 @@ def simulate(
                 result.worst.append((day, result.worst[-1][1]))
             continue
         # --- 3. Decisión con la vela de hoy cerrada ------------------------------------
+        # Con un día de retraso, lo decidido ayer aún no se ha ejecutado, pero ya cuenta:
+        # sus compras ocupan hueco y efectivo, y sus ventas ya no son cartera.
+        waiting = [o for when in sorted(pending) for o in pending[when].orders]
         bv = BookView(
             cash=book.cash,
             holdings=dict(book.holdings),
@@ -167,6 +171,8 @@ def simulate(
             peak_equity=book.peak,
             initial=cfg.initial,
             halted_risk=book.halted_risk,
+            pending_buys={o.symbol: o.usd for o in waiting if o.side == "buy"},
+            pending_sells=frozenset(o.symbol for o in waiting if o.side == "sell"),
         )
         d = decide(
             view,
@@ -177,7 +183,7 @@ def simulate(
             apply_drawdown_halt=cfg.apply_drawdown_halt,
         )
         if chooser is not None:
-            d = chooser(view, d, book)
+            d = chooser(view, d, bv)
         if any(code == "max_drawdown" for code, _ in d.halts) and cfg.apply_drawdown_halt:
             if not book.halted_risk:
                 result.halted_on = day
@@ -228,13 +234,16 @@ def _execute(
         trade.exit_day, trade.proceeds, trade.exit_purpose = day, net, order.purpose
         result.trades.append(trade)
         del book.holdings[order.symbol]
+    n = min(cfg.params.n_positions, cfg.limits.max_open_positions)
     for order in decision.buys:
         series = panel.series[order.symbol]
         i = series.at(day)
         if i is None or not series.traded(i) or order.symbol in book.holdings:
             continue
-        usd = min(order.usd, book.cash)
-        if usd < 5.0:
+        # Como en vivo (``paper._buy``): si una venta de hoy no se pudo hacer, la compra no
+        # cabe (N posiciones o efectivo insuficiente) y se rechaza; nunca se compra a medias.
+        usd = order.usd
+        if len(book.holdings) >= n or book.cash + 1e-9 < usd or usd < MIN_ORDER_USD:
             continue
         qv = _median_qv(view, order.symbol) if view else 5_000_000.0
         qty = costs.buy_qty(usd, series.open[i], qv, cfg.cost_mult)
@@ -268,7 +277,8 @@ class SignalTrade:
     rank: int
     favorable: bool | None
     ret: float  # neta de costes
-    btc_ret: float
+    btc_ret: float  # BTC en la misma ventana (de t+1 al día de salida)
+    exit_day: date | None = None  # t+8, o más tarde si ese día no se negoció
 
     @property
     def excess(self) -> float:
@@ -283,19 +293,64 @@ def _open_on(panel: Panel, symbol: str, day: date) -> float | None:
     return series.open[i]
 
 
-def _exit_price(panel: Panel, symbol: str, day: date, delist_loss: float) -> float | None:
-    """Apertura de ``day``; si ya no cotiza, el último cierre conocido con la pérdida de
-    retirada (y ``None`` si aún no se sabe porque los datos no llegan)."""
-    price = _open_on(panel, symbol, day)
-    if price is not None:
-        return price
-    series = panel.series[symbol]
-    j = series.index(day)
-    if j is None:
+def data_end(panel: Panel) -> date | None:
+    """Último día con datos: la última vela de BTC (la referencia). Después no se sabe
+    nada, ni siquiera si una moneda ha dejado de cotizar."""
+    ref = panel.series.get(panel.reference)
+    return ref.days[-1] if ref is not None and ref.days else None
+
+
+def exit_at(
+    panel: Panel, symbol: str, day: date, delist_loss: float, end: date | None
+) -> tuple[float, date] | None:
+    """Precio y día de salida de una posición que toca vender en la apertura de ``day``
+    (apartados 6.6 y 7), igual que en el motor:
+
+    * la primera apertura **con negociación** desde ``day``;
+    * si antes se cumplen 7 días seguidos sin negociar, se da por retirada ese día, al
+      último cierre negociado con la pérdida de retirada;
+    * ``None`` solo si los datos (``end``) terminan antes de saberlo.
+
+    Nunca mira cuándo termina la serie de la moneda: eso sería usar el futuro."""
+    series = panel.series.get(symbol)
+    if series is None or end is None:
         return None
-    if series.last_day < day and (day - series.last_day).days >= 1:
-        return series.close[j] * (1 - delist_loss)
+    last = series.index(day - timedelta(days=1))
+    while last is not None and last >= 0 and not series.traded(last):
+        last -= 1
+    if last is None or last < 0:
+        return None  # nunca se negoció antes: no hay posición que cerrar
+    probe = day
+    while probe <= end:
+        i = series.at(probe)
+        if i is not None and series.traded(i):
+            return series.open[i], probe
+        if (probe - series.days[last]).days >= DELIST_DAYS:
+            return series.close[last] * (1 - delist_loss), probe
+        probe += timedelta(days=1)
     return None
+
+
+def window_return(
+    panel: Panel,
+    symbol: str,
+    entry_day: date,
+    exit_day: date,
+    median_qv: float | None,
+    *,
+    end: date | None,
+    cost_mult: float = 1.0,
+    delist_loss: float = 1 - DELISTED_HAIRCUT,
+) -> tuple[float, date] | None:
+    """Rentabilidad neta de costes de comprar en la apertura de ``entry_day`` y vender con
+    la regla de :func:`exit_at` desde ``exit_day``; y el día en que se vende."""
+    o0 = _open_on(panel, symbol, entry_day)
+    out = None if o0 is None else exit_at(panel, symbol, exit_day, delist_loss, end)
+    if out is None:
+        return None
+    o1, sold_on = out
+    qty = costs.buy_qty(1.0, o0, median_qv, cost_mult)
+    return costs.sell_usd(qty, o1, median_qv, cost_mult) - 1, sold_on
 
 
 def signals_book(
@@ -309,9 +364,11 @@ def signals_book(
     market: str = "BTCUSDT",
 ) -> list[SignalTrade]:
     """Cada día, las 5 primeras con tendencia (sin filtro de mercado): 10 $ en cada una de
-    la apertura de t+1 a la de t+8, con costes, frente a BTC en la misma ventana."""
+    la apertura de t+1 a la de t+8 (o la primera negociada después, o su retirada), con
+    costes, frente a BTC en la misma ventana."""
     out = []
     horizon = p.signals_book_days
+    kw = {"end": data_end(panel), "cost_mult": cost_mult, "delist_loss": delist_loss}
     for day in days:
         view = views.get(day)
         if view is None:
@@ -319,58 +376,62 @@ def signals_book(
         picks = [s for s in view.ranked if s.trend_share + 1e-9 >= p.entry_trend]
         picks = picks[: p.signals_book_top]
         entry_day, exit_day = day + timedelta(days=1), day + timedelta(days=1 + horizon)
-        b0 = _open_on(panel, market, entry_day)
-        b1 = _open_on(panel, market, exit_day)
-        if b0 is None or b1 is None:
+        if _open_on(panel, market, entry_day) is None:
             continue
         qv_btc = _median_qv(view, market)
-        btc_ret = costs.sell_usd(costs.buy_qty(1.0, b0, qv_btc, cost_mult), b1, qv_btc, cost_mult)
+        fav = None if view.regime is None else view.regime.favorable
+        btc: dict[date, tuple[float, date] | None] = {}
         for sig in picks:
-            o0 = _open_on(panel, sig.symbol, entry_day)
-            o1 = _exit_price(panel, sig.symbol, exit_day, delist_loss)
-            if o0 is None or o1 is None:
+            leg = window_return(
+                panel, sig.symbol, entry_day, exit_day, _median_qv(view, sig.symbol), **kw
+            )
+            if leg is None:
                 continue
-            qv = _median_qv(view, sig.symbol)
-            usd = p.signals_book_usd
-            back = costs.sell_usd(costs.buy_qty(usd, o0, qv, cost_mult), o1, qv, cost_mult)
-            fav = None if view.regime is None else view.regime.favorable
-            out.append(SignalTrade(day, sig.symbol, sig.rank, fav, back / usd - 1, btc_ret - 1))
+            ret, sold_on = leg
+            if sold_on not in btc:
+                btc[sold_on] = window_return(panel, market, entry_day, sold_on, qv_btc, **kw)
+            ref = btc[sold_on]
+            if ref is None:
+                continue
+            out.append(SignalTrade(day, sig.symbol, sig.rank, fav, ret, ref[0], sold_on))
     return out
 
 
 # --- Nulo aleatorio -------------------------------------------------------------------
 
 
-def random_chooser(seed: int, durations: list[int], n_positions: int) -> Callable:
+def random_chooser(
+    seed: int,
+    durations: list[int],
+    params: StrategyParams,
+    limits: RiskLimits,
+    mode: str = "porcentaje",
+) -> Callable:
     """Compras al azar entre las monedas del universo con tendencia que no están en
     cartera, y salida por puesto sustituida por una duración sacada al azar de las de la
-    estrategia principal (misma rotación). El resto de reglas no cambia."""
+    estrategia principal (misma rotación). El resto de reglas no cambia: los huecos y la
+    reserva salen de la misma ``buy_room()`` que usa ``decide()``."""
     rng = random.Random(seed)  # noqa: S311 (estadística, no criptografía)
     hold_until: dict[str, date] = {}
 
-    def choose(view: DayView, d: Decision, book: _Book) -> Decision:
+    def choose(view: DayView, d: Decision, book: BookView) -> Decision:
         orders = [o for o in d.sells if o.purpose != "puesto"]
         sold = {o.symbol for o in orders}
         for symbol, until in sorted(hold_until.items()):
             due = symbol in book.holdings and symbol not in sold and view.day >= until
-            if due and symbol in view.close:
+            if due and symbol in view.close and symbol not in book.pending_sells:
                 orders.append(Order(symbol, "sell", "puesto", "duración al azar"))
                 sold.add(symbol)
         size = d.size_usd
-        if size >= 5.0:
-            cash = book.cash + sum(
-                book.holdings[s].qty * view.close[s] * (1 - SELL_COST_ESTIMATE) for s in sold
-            )
-            room = int(max(0.0, cash - 0.1 * d.equity) // size)
-            slots = min(n_positions - (len(book.holdings) - len(sold)), room)
+        if size >= MIN_ORDER_USD:
+            room = buy_room(view, book, sold, d.equity, params, limits, mode)
+            taken = sold | set(book.holdings) | set(book.pending_buys)
             pool = sorted(
                 s.symbol
                 for s in view.ranked
-                if s.trend_share + 1e-9 >= 2 / 3
-                and s.symbol not in book.holdings
-                and s.symbol not in sold
+                if s.trend_share + 1e-9 >= params.entry_trend and s.symbol not in taken
             )
-            for symbol in rng.sample(pool, max(0, min(slots, len(pool)))):
+            for symbol in rng.sample(pool, min(room.fits(size), len(pool))):
                 orders.append(Order(symbol, "buy", "entrada", "al azar", usd=size))
                 hold_until[symbol] = view.day + timedelta(days=rng.choice(durations or [7]))
         return replace(d, orders=orders)

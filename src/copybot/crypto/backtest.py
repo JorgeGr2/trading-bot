@@ -34,9 +34,11 @@ from copybot.crypto.engine import (
     RunResult,
     SignalTrade,
     build_views,
+    data_end,
     random_chooser,
     signals_book,
     simulate,
+    window_return,
 )
 from copybot.crypto.panel import Panel
 from copybot.crypto.strategy import STRATEGY_V1, VARIANTS, DayView, StrategyParams
@@ -44,6 +46,7 @@ from copybot.crypto.strategy import STRATEGY_V1, VARIANTS, DayView, StrategyPara
 MIN_UNIVERSE = 20  # la evaluación empieza el primer día con |U| ≥ 20
 RANK_BUCKETS = ((1, 1), (2, 5), (6, 12), (13, 30), (31, 10_000))
 HORIZONS_C = (28, 90, 365)
+RESAMPLES = 5000  # B de los bootstrap (apartado 8.5); las pruebas usan menos
 Progress = Callable[[str], None]
 
 
@@ -128,16 +131,17 @@ def curve_metrics(curve, worst_curve=None) -> dict:
     mean = statistics.fmean(rets) if rets else 0.0
     cagr = (1 + total) ** (1 / years) - 1 if total > -1 else -1.0
     mdd = max_drawdown(curve, worst_curve)
-    months: dict[tuple[int, int], list[float]] = defaultdict(list)
-    for d, v in curve:
-        months[(d.year, d.month)].append(v)
+    # Cada mes, de su último valor al del mes anterior; el primero parte del valor inicial
+    # de la curva (si no, el primer mes no contaría).
+    month_end: dict[tuple[int, int], float] = {}
+    for d, v in curve[1:]:
+        month_end[(d.year, d.month)] = v
     monthly = []
-    prev = None
-    for key in sorted(months):
-        end = months[key][-1]
-        if prev is not None:
-            monthly.append(end / prev - 1)
-        prev = end
+    prev = values[0] if values else None
+    for key in sorted(month_end):
+        if prev:
+            monthly.append(month_end[key] / prev - 1)
+        prev = month_end[key]
     return {
         "total": total,
         "anual": cagr,
@@ -171,6 +175,9 @@ class BacktestResult:
     quintiles: list[float]
     null_finals: list[float]
     null_percentile: float
+    null_sharpes: list[float]
+    null_sharpe_percentile: float | None
+    trades_ci: dict  # operaciones cerradas de la curva A, por semana ISO de entrada
     starts: dict[int, dict]
     survival: dict
     top3: list[str]
@@ -178,6 +185,7 @@ class BacktestResult:
     params_hash: str
     cost_table_hash: str
     seed: int
+    requested_end: date | None = None  # el pedido, si los datos acaban antes que él
     extra: dict = field(default_factory=dict)
 
 
@@ -194,6 +202,12 @@ def data_hash(panel: Panel) -> str:
 
 
 def evaluation_days(panel: Panel, views: dict[date, DayView], end: date) -> list[date]:
+    """Del primer día con |U| ≥ 20 hasta ``end`` o, si los datos acaban antes, hasta la
+    última vela de BTC: más allá no hay datos y las posiciones se darían por retiradas
+    sin serlo."""
+    last = data_end(panel)
+    if last is not None:
+        end = min(end, last)
     days = sorted(d for d, v in views.items() if d <= end)
     first = next((d for d in days if len(views[d].universe.members) >= MIN_UNIVERSE), None)
     if first is None:
@@ -205,22 +219,33 @@ def evaluation_days(panel: Panel, views: dict[date, DayView], end: date) -> list
     return out
 
 
-def _forward(panel: Panel, symbol: str, day: date, horizon: int, view: DayView) -> float | None:
-    """Rentabilidad neta de costes de la apertura de t+1 a la de t+1+horizon."""
-    s = panel.series.get(symbol)
-    if s is None:
-        return None
-    i0 = s.at(day + timedelta(days=1))
-    i1 = s.at(day + timedelta(days=1 + horizon))
-    if i0 is None or i1 is None:
-        return None
+def _forward(
+    panel: Panel,
+    symbol: str,
+    day: date,
+    horizon: int,
+    view: DayView,
+    *,
+    end: date | None,
+    exit_day: date | None = None,
+) -> tuple[float, date] | None:
+    """Rentabilidad neta de costes de la apertura de t+1 a la de t+1+horizon (o a
+    ``exit_day``), con la misma regla de salida que el libro de señales: la primera
+    apertura negociada o, tras 7 días sin negociar, la retirada; y el día de la salida."""
     qv = next((m.median_quote_volume for m in view.universe.members if m.symbol == symbol), 5e6)
-    back = costs.sell_usd(costs.buy_qty(1.0, s.open[i0], qv), s.open[i1], qv)
-    return back - 1
+    entry = day + timedelta(days=1)
+    target = exit_day or day + timedelta(days=1 + horizon)
+    return window_return(panel, symbol, entry, target, qv, end=end)
 
 
 def calibration(
-    panel: Panel, views: dict[date, DayView], days: list[date], *, horizon: int = 7, seed: int = 7
+    panel: Panel,
+    views: dict[date, DayView],
+    days: list[date],
+    *,
+    horizon: int = 7,
+    seed: int = 7,
+    resamples: int = RESAMPLES,
 ) -> tuple[dict[str, dict], dict, list[float]]:
     """Por tramos de puesto: exceso frente a BTC a 7 días y % de veces que lo bate; IC de
     rangos (Spearman entre puntos y rentabilidad) y rentabilidad por quintil."""
@@ -228,27 +253,34 @@ def calibration(
     beats: dict[str, list[float]] = defaultdict(list)
     ics: list[float] = []
     quint: list[list[float]] = [[] for _ in range(5)]
+    end = data_end(panel)
     for day in days:
         view = views.get(day)
         if view is None or not view.ranked:
             continue
-        btc = _forward(panel, "BTCUSDT", day, horizon, view)
-        if btc is None:
-            continue
+        btc: dict[date, tuple[float, date] | None] = {}  # BTC en la misma ventana
         rows = []
         for sig in view.ranked:
-            r = _forward(panel, sig.symbol, day, horizon, view)
-            if r is not None:
-                rows.append((sig, r))
+            leg = _forward(panel, sig.symbol, day, horizon, view, end=end)
+            if leg is None:
+                continue
+            r, sold_on = leg
+            if sold_on not in btc:
+                btc[sold_on] = _forward(
+                    panel, "BTCUSDT", day, horizon, view, end=end, exit_day=sold_on
+                )
+            ref = btc[sold_on]
+            if ref is not None:
+                rows.append((sig, r, ref[0]))
         if len(rows) < 5:
             continue
         for lo, hi in RANK_BUCKETS:
-            sel = [math.log1p(r) - math.log1p(btc) for sig, r in rows if lo <= sig.rank <= hi]
+            sel = [math.log1p(r) - math.log1p(b) for sig, r, b in rows if lo <= sig.rank <= hi]
             if sel:
                 key = f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10_000 else f"{lo}+")
                 by_bucket[key].append(statistics.fmean(sel))
                 beats[key].append(sum(1 for x in sel if x > 0) / len(sel))
-        rho = stats.spearman([s.score for s, _ in rows], [r for _, r in rows])
+        rho = stats.spearman([s.score for s, _, _ in rows], [r for _, r, _ in rows])
         if rho is not None:
             ics.append(rho)
         ordered = sorted(rows, key=lambda x: x[0].score)
@@ -256,10 +288,10 @@ def calibration(
         for q in range(5):
             chunk = ordered[q * n // 5 : (q + 1) * n // 5]
             if chunk:
-                quint[q].append(statistics.fmean(r for _, r in chunk))
+                quint[q].append(statistics.fmean(r for _, r, _ in chunk))
     cal = {}
     for key, values in by_bucket.items():
-        lo, hi = stats.stationary_bootstrap_ci(values, blocks=(28,), seed=seed, resamples=2000)
+        lo, hi = stats.stationary_bootstrap_ci(values, blocks=(28,), seed=seed, resamples=resamples)
         cal[key] = {
             "dias": len(values),
             "exceso_medio": statistics.fmean(values),
@@ -268,7 +300,7 @@ def calibration(
         }
     ic = {}
     if len(ics) > 2:
-        lo, hi = stats.stationary_bootstrap_ci(ics, blocks=(28,), seed=seed, resamples=2000)
+        lo, hi = stats.stationary_bootstrap_ci(ics, blocks=(28,), seed=seed, resamples=resamples)
         ic = {
             "media": statistics.fmean(ics),
             "dias_positivo": sum(1 for x in ics if x > 0) / len(ics),
@@ -278,7 +310,9 @@ def calibration(
     return cal, ic, [statistics.fmean(q) if q else 0.0 for q in quint]
 
 
-def signals_summary(trades: list[SignalTrade], seed: int = 7) -> dict:
+def signals_summary(
+    trades: list[SignalTrade], seed: int = 7, *, resamples: int = RESAMPLES
+) -> dict:
     """Exceso por operación frente a BTC, agregado primero por día de entrada."""
     by_day: dict[date, list[float]] = defaultdict(list)
     for t in trades:
@@ -287,7 +321,7 @@ def signals_summary(trades: list[SignalTrade], seed: int = 7) -> dict:
     if len(daily) < 3:
         return {"operaciones": len(trades), "dias": len(daily)}
     ci = {
-        blk: stats.stationary_bootstrap_ci(daily, blocks=(blk,), seed=seed, resamples=2000)
+        blk: stats.stationary_bootstrap_ci(daily, blocks=(blk,), seed=seed, resamples=resamples)
         for blk in (7, 28)
     }
     return {
@@ -297,6 +331,33 @@ def signals_summary(trades: list[SignalTrade], seed: int = 7) -> dict:
         "ic": ci,
         "bate_btc": sum(1 for t in trades if t.excess > 0) / len(trades),
     }
+
+
+def trades_by_week(run: RunResult, seed: int = 7, *, resamples: int = RESAMPLES) -> dict:
+    """Rentabilidad media de las operaciones cerradas, con el intervalo de un bootstrap por
+    grupos: las operaciones de una misma semana ISO de entrada no son independientes."""
+    weeks: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for t in run.trades:
+        if t.exit_day is not None:
+            iso = t.entry_day.isocalendar()
+            weeks[(iso.year, iso.week)].append(t.ret)
+    groups = [group for _, group in sorted(weeks.items())]
+    rets = [r for group in groups for r in group]
+    if len(groups) < 2:
+        return {"operaciones": len(rets), "semanas": len(groups)}
+    return {
+        "operaciones": len(rets),
+        "semanas": len(groups),
+        "media": statistics.fmean(rets),
+        "ic": stats.cluster_bootstrap_ci(groups, resamples=resamples, seed=seed),
+    }
+
+
+def percentile_in(value: float, others: list[float]) -> float | None:
+    """% de ``others`` estrictamente por debajo de ``value`` (``None`` sin ``others``)."""
+    if not others:
+        return None
+    return 100 * sum(1 for x in others if x < value) / len(others)
 
 
 def monday_starts(
@@ -363,7 +424,10 @@ def _subperiods(start: date, end: date) -> list[Period]:
 
 
 def _slice(curve, period: Period):
-    return [(d, v) for d, v in curve if period.start <= d <= period.end]
+    """Los puntos del periodo precedidos del último anterior a su inicio: es la base de la
+    rentabilidad del primer día, que si no se perdería."""
+    before = [(d, v) for d, v in curve if d < period.start][-1:]
+    return before + [(d, v) for d, v in curve if period.start <= d <= period.end]
 
 
 def top_contributors(run: RunResult, n: int = 3) -> list[str]:
@@ -382,6 +446,7 @@ def run_backtest(
     null_seeds: int = 1000,
     params: StrategyParams = STRATEGY_V1,
     progress: Progress | None = None,
+    resamples: int = RESAMPLES,
 ) -> BacktestResult:
     say = progress or (lambda _m: None)
     all_days = sorted(d for d in panel.days if d <= end)
@@ -390,6 +455,7 @@ def run_backtest(
     days = evaluation_days(panel, views, end)
     if not days:
         raise ValueError("no hay ningún día con al menos 20 monedas en el universo")
+    requested_end, end = end, days[-1]  # los datos pueden acabar antes de lo pedido
     start = days[0]
     sizes = {d: len(views[d].universe.members) for d in days if d in views}
 
@@ -433,9 +499,13 @@ def run_backtest(
     p_surv = replace(params, universe=replace(params.universe, exclude=dead))
     stress["solo_supervivientes"] = curve_a(p_surv, build_views(panel, days, p_surv))
 
-    excess_a = excess_vs(a.curve, btc, seed=seed)
-    excess_variants = {k: excess_vs(v.curve, btc, seed=seed) for k, v in variants.items()}
-    excess_stress = {k: excess_vs(v.curve, btc, seed=seed) for k, v in stress.items()}
+    excess_a = excess_vs(a.curve, btc, seed=seed, resamples=resamples)
+    excess_variants = {
+        k: excess_vs(v.curve, btc, seed=seed, resamples=resamples) for k, v in variants.items()
+    }
+    excess_stress = {
+        k: excess_vs(v.curve, btc, seed=seed, resamples=resamples) for k, v in stress.items()
+    }
     subperiods = {}
     for per in _subperiods(start, end):
         ca, cb = _slice(a.curve, per), _slice(btc, per)
@@ -452,7 +522,7 @@ def run_backtest(
 
     say("Libro de señales y calibración por puesto…")
     signals = signals_book(panel, views, days, params)
-    cal, ic, quint = calibration(panel, views, days, seed=seed)
+    cal, ic, quint = calibration(panel, views, days, seed=seed, resamples=resamples)
 
     say(f"Nulo aleatorio ({null_seeds} carteras)…")
     durations = [
@@ -460,12 +530,16 @@ def run_backtest(
         for t in a.trades
         if t.exit_purpose == "puesto" and t.exit_day is not None
     ]
-    finals = []
+    finals, sharpes = [], []
     for s in range(1, null_seeds + 1):
-        chooser = random_chooser(s, durations, params.n_positions)
+        chooser = random_chooser(s, durations, params, limits)
         cfg = RunConfig(params, limits, mode="porcentaje")
-        finals.append(simulate(panel, views, days, cfg, chooser=chooser).final)
+        run = simulate(panel, views, days, cfg, chooser=chooser)
+        finals.append(run.final)
+        # Sin variación (sin operar) el Sharpe no existe: cuenta como 0.
+        sharpes.append(curve_metrics(run.curve)["sharpe"] or 0.0)
     pct = 100 * sum(1 for f in finals if f < a.final) / len(finals) if finals else 0.0
+    sharpe_pct = percentile_in(curve_metrics(a.curve)["sharpe"] or 0.0, sharpes)
 
     say("Arranques de cada lunes (28, 90 y 365 días)…")
     starts = monday_starts(panel, views, days, params, limits, bench["btc"])
@@ -497,12 +571,15 @@ def run_backtest(
         excess_stress=excess_stress,
         subperiods=subperiods,
         signals=signals,
-        signals_excess=signals_summary(signals, seed),
+        signals_excess=signals_summary(signals, seed, resamples=resamples),
         calibration=cal,
         ic=ic,
         quintiles=quint,
         null_finals=finals,
         null_percentile=pct,
+        null_sharpes=sharpes,
+        null_sharpe_percentile=sharpe_pct,
+        trades_ci=trades_by_week(a, seed, resamples=resamples),
         starts=starts,
         survival=survival,
         top3=top3,
@@ -510,6 +587,7 @@ def run_backtest(
         params_hash=params.params_hash(),
         cost_table_hash=costs.cost_table_hash(),
         seed=seed,
+        requested_end=requested_end if requested_end != end else None,
     )
 
 

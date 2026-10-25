@@ -67,6 +67,29 @@ uv run copybot crypto prereg check          # el código coincide con lo registr
 
 Necesita PostgreSQL (`COPYBOT_DATABASE_URL`) y acceso a `data-api.binance.vision`.
 
+## Panel
+
+```bash
+uv run copybot panel                              # http://127.0.0.1:8000, solo este ordenador
+uv run copybot panel --host 0.0.0.0 --port 8000   # para verlo desde el móvil en tu red
+```
+
+Página local con el estado del bot de cripto: saldo de la cartera de prueba de 100 $
+frente a BTC comprado el mismo día, ganancia o pérdida con comisiones, aciertos, caída
+máxima, semáforo «¿Es rentable?», registro de compras y ventas con su motivo y su
+resultado, la decisión de hoy con las 10 mejor puntuadas y su «por qué», los umbrales de
+la regla (y si la nº 1 de hoy los cumple), el latido del paso diario y los seis pasos del
+día (descarga, filtro, puntúa, riesgo, ejecuta y libro), cada uno con su mascota. Se
+actualiza sola cada 15 s, se ve bien en el móvil y funciona sin internet (todo va dentro
+de la página). La pestaña «Sniper Solana (simulación)» queda reservada para el futuro bot
+de sniping y de momento dice «sin datos todavía».
+
+Todos los números salen de la base de datos; si no hay, pone «sin datos todavía». El
+panel solo lee (su conexión es de solo lectura) y nunca enseña la configuración ni claves.
+No tiene contraseña: con `--host 0.0.0.0` lo puede ver cualquiera que llegue a tu red.
+La página usa una API JSON: `/api/estado` (con `?cartera=N` enseña otra cartera) y
+`/api/sniper`.
+
 ## Uso para desarrolladores (laboratorio de memecoins, fases 2-5)
 
 Requisitos: Python 3.12+, [uv](https://docs.astral.sh/uv/) y PostgreSQL 16. El

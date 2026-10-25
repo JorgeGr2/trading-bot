@@ -13,6 +13,8 @@ dependencies = [
     "asyncpg>=0.29",
     "alembic>=1.13",
     "structlog>=24.1",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
 ]
 
 [dependency-groups]

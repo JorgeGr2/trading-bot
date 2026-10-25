@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title>Bot cripto (simulado)</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='17' y='18' width='30' height='40' rx='9' fill='%232fd4c4'/%3E%3Ccircle cx='26' cy='36' r='3.4' fill='%230b0d12'/%3E%3Ccircle cx='38' cy='36' r='3.4' fill='%230b0d12'/%3E%3Cpath d='M32 4c4 5 4 8 0 9c-4-1-4-4 0-9z' fill='%23ffc94d'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0b0d12;
+  --surface: #141720;
+  --surface-2: #1a1e29;
+  --surface-3: #222736;
+  --line: #262b39;
+  --grid: #20242f;
+  --ink: #eceef4;
+  --ink-2: #b3b9c9;
+  --muted: #7d8497;
+  --accent: #ff4fa3;
+  --accent-soft: rgba(255, 79, 163, 0.14);
+  --series-1: #ec4f98;
+  --series-2: #3a8ae6;
+  --good: #3ddc97;
+  --warn: #ffb547;
+  --bad: #ff5d6c;
+  --gray: #8a90a2;
+  --radius: 14px;
+  --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+.wrap { max-width: 1440px; margin: 0 auto; padding: 18px 24px 40px; }
+.num, .mono { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.ink2 { color: var(--ink-2); }
+.good { color: var(--good); }
+.bad { color: var(--bad); }
+.warn { color: var(--warn); }
+[hidden] { display: none !important; }
+
+/* --- Cabecera ----------------------------------------------------------------------- */
+.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  flex-wrap: wrap; padding: 6px 0 14px;
+}
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand svg { flex: none; }
+.brand h1 { margin: 0; font-size: 20px; letter-spacing: 0.01em; font-weight: 750; }
+.brand h1 span { color: var(--accent); font-weight: 650; }
+.brand p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+.status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pill {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-radius: 999px; background: var(--surface); border: 1px solid var(--line);
+  font-size: 12.5px; white-space: nowrap;
+}
+.live b { font-weight: 800; letter-spacing: 0.08em; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--gray); flex: none; }
+.live.on .dot { background: var(--good); box-shadow: 0 0 0 0 rgba(61, 220, 151, 0.6); animation: ping 1.8s infinite; }
+.live.on b { color: var(--good); }
+.live.off .dot { background: var(--bad); }
+.live.off b { color: var(--bad); }
+@keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(61, 220, 151, 0.55); } 80%, 100% { box-shadow: 0 0 0 8px rgba(61, 220, 151, 0); } }
+.clock { font-family: var(--mono); }
+.banner {
+  margin: 0 0 14px; padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(255, 93, 108, 0.4);
+  background: rgba(255, 93, 108, 0.08); color: var(--ink); font-size: 13px;
+}
+
+/* --- Pestañas ----------------------------------------------------------------------- */
+.tabs { display: flex; gap: 6px; margin: 0 0 16px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs button {
+  appearance: none; border: 0; background: none; color: var(--muted); font: inherit; font-weight: 650;
+  padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
+
+/* --- Tarjetas ----------------------------------------------------------------------- */
+.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px 15px; min-width: 0; position: relative; overflow: hidden;
+}
+.label {
+  font-size: 11px; font-weight: 750; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+}
+.big { font-size: 28px; font-weight: 780; letter-spacing: -0.01em; margin: 6px 0 4px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.big.empty { font-size: 15px; font-weight: 600; color: var(--muted); margin: 12px 0 8px; }
+.sub { font-size: 12.5px; color: var(--ink-2); }
+.meter { height: 6px; background: var(--surface-3); border-radius: 99px; margin-top: 10px; position: relative; overflow: hidden; }
+.meter i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; background: var(--ink-2); }
+.light { display: inline-flex; align-items: center; gap: 8px; }
+.lamp { display: inline-block; flex: none; }
+.light .lamp { width: 14px; height: 14px; border-radius: 50%; background: var(--gray); }
+.lamp.verde { background: var(--good); box-shadow: 0 0 12px rgba(61, 220, 151, 0.5); }
+.lamp.ambar { background: var(--warn); box-shadow: 0 0 12px rgba(255, 181, 71, 0.5); }
+.lamp.rojo { background: var(--bad); box-shadow: 0 0 12px rgba(255, 93, 108, 0.5); }
+.lamp.gris { background: var(--gray); }
+.lights { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; font-size: 12.5px; color: var(--ink-2); }
+.lights span { display: inline-flex; align-items: center; gap: 6px; }
+.lights .lamp { width: 9px; height: 9px; border-radius: 50%; box-shadow: none; }
+
+/* --- Rejilla de paneles ------------------------------------------------------------- */
+.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; }
+.span-4 { grid-column: span 4; } .span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; }
+.span-7 { grid-column: span 7; } .span-8 { grid-column: span 8; } .span-12 { grid-column: span 12; }
+.panel {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px 16px; min-width: 0;
+}
+.panel > header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.panel h2 { margin: 0; font-size: 12px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-2); }
+.panel h2 em { font-style: normal; color: var(--accent); }
+.hint { font-size: 12px; color: var(--muted); }
+.empty-state { color: var(--muted); padding: 22px 0; text-align: center; font-weight: 600; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+select {
+  background: var(--surface-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  font: inherit; font-size: 12.5px; padding: 4px 8px;
+}
+
+/* --- Gráficos ----------------------------------------------------------------------- */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.axis text, .chart text { fill: var(--muted); font-size: 11px; font-family: var(--sans); }
+.tip {
+  position: absolute; pointer-events: none; background: var(--surface-3); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 9px; font-size: 12px; color: var(--ink); white-space: nowrap;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45); z-index: 3;
+}
+.tip b { font-weight: 700; }
+.tip .row { display: flex; align-items: center; gap: 6px; }
+.tip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+/* --- Registro ----------------------------------------------------------------------- */
+.log { max-height: 392px; overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
+.logrow {
+  display: grid; grid-template-columns: 74px minmax(0, 1fr) auto; gap: 4px 10px; align-items: start;
+  padding: 9px 0; border-bottom: 1px solid var(--grid);
+}
+.logrow:last-child { border-bottom: 0; }
+.tag {
+  display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; padding: 3px 7px;
+  border-radius: 6px; text-align: center; background: var(--surface-3); color: var(--ink-2);
+}
+.tag.buy { background: rgba(58, 138, 230, 0.16); color: #8cbcf5; }
+.tag.sell { background: var(--accent-soft); color: #ff9cca; }
+.tag.evt { background: var(--surface-3); color: var(--muted); }
+.logrow .what { min-width: 0; }
+.logrow .what b { font-weight: 750; }
+.logrow .why { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.logrow .res { text-align: right; font-size: 12.5px; white-space: nowrap; }
+.logrow .when { color: var(--muted); font-size: 11.5px; }
+.res .tag { margin-bottom: 3px; }
+.tag.win { background: rgba(61, 220, 151, 0.14); color: var(--good); }
+.tag.loss { background: rgba(255, 93, 108, 0.14); color: var(--bad); }
+.tag.open { background: var(--surface-3); color: var(--ink-2); }
+.tag.rej { background: rgba(255, 181, 71, 0.14); color: var(--warn); }
+
+/* --- Agentes ------------------------------------------------------------------------ */
+.agents { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+.agent {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; position: relative;
+}
+.agent.run { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 22px rgba(255, 79, 163, 0.22); }
+.agent .head { display: flex; align-items: center; gap: 10px; }
+.agent .who { min-width: 0; }
+.agent .step { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: 0.04em; white-space: nowrap; }
+.agent .name { font-weight: 800; letter-spacing: 0.1em; font-size: 13px; }
+.state {
+  align-self: flex-start; font-size: 10.5px; font-weight: 800; letter-spacing: 0.1em; padding: 3px 8px;
+  border-radius: 6px; border: 1px solid var(--line); color: var(--muted);
+}
+.agent.run .state { background: var(--accent); border-color: var(--accent); color: #1a0710; }
+.agent .line { font-size: 12.5px; color: var(--ink); overflow-wrap: anywhere; }
+.agent .detail { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.agent.run svg.mascot { animation: bob 1.1s ease-in-out infinite; }
+@keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+svg.mascot .eye { transform-box: fill-box; transform-origin: center; animation: blink 5s infinite; }
+@keyframes blink { 0%, 94%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
+.office { margin-top: 14px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #11141c; }
+.office > svg { display: block; width: 100%; height: auto; }
+.office .bobber { animation: bob 1.1s ease-in-out infinite; }
+.office .zz { animation: float 2.6s ease-in-out infinite; }
+@keyframes float { 0% { opacity: 0; transform: translateY(4px); } 30% { opacity: 1; } 100% { opacity: 0; transform: translateY(-10px); } }
+.office .screen-on { animation: glow 1.6s ease-in-out infinite; }
+@keyframes glow { 0%, 100% { opacity: 0.85; } 50% { opacity: 1; } }
+
+/* --- Latido ------------------------------------------------------------------------- */
+.pulse svg { display: block; width: 100%; height: 100px; }
+.pulse text { fill: var(--muted); font-size: 11px; font-family: var(--sans); }
+.pulse .scan { animation: scan 4s linear infinite; }
+@keyframes scan { from { transform: translateX(0); } to { transform: translateX(var(--scan-w, 600px)); } }
+.pulse-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-top: 6px; }
+.pulse-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.pulse-legend i { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
+
+/* --- Hoy y tablas ------------------------------------------------------------------- */
+.decision { font-size: 18px; font-weight: 760; line-height: 1.3; margin: 2px 0 8px; }
+.facts { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--ink-2); margin-bottom: 12px; }
+.facts b { color: var(--ink); font-weight: 700; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 99px; font-size: 12px;
+  background: var(--surface-3); color: var(--ink-2); font-weight: 650;
+}
+.chip.good { color: var(--good); background: rgba(61, 220, 151, 0.12); }
+.chip.bad { color: var(--bad); background: rgba(255, 93, 108, 0.12); }
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+th { text-align: right; font-size: 10.5px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { text-align: right; padding: 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child, th.l, td.l { text-align: left; }
+tr.coin { cursor: pointer; }
+tr.coin:hover td { background: var(--surface-2); }
+tr.coin td:first-child { color: var(--muted); }
+tr.coin button { all: unset; cursor: pointer; font-weight: 750; color: var(--ink); }
+tr.coin button:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
+tr.coin .caret { color: var(--muted); font-size: 11px; margin-left: 4px; }
+tr.why td { white-space: normal; text-align: left; color: var(--ink-2); background: var(--surface-2); font-size: 12.5px; line-height: 1.5; padding: 10px 12px; }
+.badges { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: 1px; }
+.badge { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; padding: 2px 6px; border-radius: 5px; }
+.badge.buy { background: rgba(58, 138, 230, 0.16); color: #8cbcf5; }
+.badge.held { background: var(--accent-soft); color: #ff9cca; }
+.badge.blocked { background: rgba(255, 181, 71, 0.14); color: var(--warn); }
+
+/* --- Umbrales (fichero de código) ---------------------------------------------------- */
+.code { background: #0f1218; border: 1px solid var(--line); border-radius: 10px; font-family: var(--mono); font-size: 12px; overflow: hidden; }
+.code .bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.code .bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--surface-3); display: inline-block; }
+.code .bar span { margin-left: 6px; }
+.code .body { padding: 8px 0; max-height: 560px; overflow-y: auto; }
+.code .cmt { color: #6f7890; padding: 6px 12px 2px; }
+.code .ln { display: grid; grid-template-columns: 26px minmax(0, 1fr) 20px; gap: 8px; padding: 3px 12px 3px 6px; align-items: start; }
+.code .ln:hover { background: #151924; }
+.code .no { color: #464d61; text-align: right; user-select: none; }
+.code .k { color: #c7a6ff; }
+.code .v { color: #ffd479; }
+.code .t { color: #6f7890; display: block; white-space: normal; overflow-wrap: anywhere; }
+.code .m { color: var(--ink-2); display: block; white-space: normal; overflow-wrap: anywhere; }
+.code .ok { color: var(--good); font-weight: 800; text-align: center; }
+.code .ko { color: var(--bad); font-weight: 800; text-align: center; }
+.code .na { color: #464d61; text-align: center; }
+
+/* --- Backtest y universo ------------------------------------------------------------ */
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.kv div { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
+.kv b { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 760; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.bars .row { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) 44px; gap: 10px; align-items: center; padding: 5px 0; font-size: 12.5px; }
+.bars .row span:first-child { color: var(--ink-2); overflow-wrap: anywhere; }
+.bars .track { height: 8px; background: var(--surface-3); border-radius: 99px; overflow: hidden; }
+.bars .track i { display: block; height: 100%; background: var(--series-2); border-radius: 99px; }
+.bars .row b { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+details.report summary { cursor: pointer; color: var(--ink-2); font-weight: 700; }
+details.report pre {
+  white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; color: var(--ink-2);
+  background: #0f1218; border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 10px 0 0;
+  max-height: 520px; overflow-y: auto;
+}
+footer { margin-top: 22px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+
+/* --- Sniper ------------------------------------------------------------------------- */
+.placeholder { text-align: center; padding: 34px 16px; }
+.placeholder h3 { margin: 10px 0 6px; font-size: 18px; }
+.placeholder p { margin: 0 auto; max-width: 560px; color: var(--ink-2); }
+
+/* --- Móvil -------------------------------------------------------------------------- */
+@media (max-width: 1180px) {
+  .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .agents { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .span-4, .span-5, .span-6, .span-7, .span-8 { grid-column: span 12; }
+}
+@media (max-width: 640px) {
+  .wrap { padding: 12px 16px 32px; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .cards .card.wide { grid-column: span 2; }
+  .agents { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .big { font-size: 23px; }
+  .brand h1 { font-size: 17px; }
+  .status { width: 100%; }
+  .grid { gap: 12px; }
+  .panel { padding: 12px; }
+  .logrow { grid-template-columns: 64px minmax(0, 1fr); }
+  .logrow .res { grid-column: 2; text-align: left; }
+  .decision { font-size: 16px; }
+  .opt { display: none; }
+  td, th { padding: 7px 5px; }
+  .badges { display: flex; margin: 3px 0 0; flex-wrap: wrap; }
+  .agent svg.mascot { width: 38px; height: 38px; }
+  .agent .head { gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <span id="logo"></span>
+      <div>
+        <h1>Bot cripto <span>(simulado)</span></h1>
+        <p>Solo simulación · 100 $ ficticios · sin claves ni órdenes reales</p>
+      </div>
+    </div>
+    <div class="status">
+      <span class="pill live" id="live" title="Latido del servicio diario (crypto_daily)"><i class="dot"></i><b>…</b></span>
+      <span class="pill" id="beat">cargando…</span>
+      <span class="pill clock" id="clock">--:--:-- UTC</span>
+    </div>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+
+  <nav class="tabs" role="tablist" aria-label="Secciones">
+    <button role="tab" id="tab-btn-cripto" aria-controls="tab-cripto" aria-selected="true" data-tab="cripto">Cripto · Binance</button>
+    <button role="tab" id="tab-btn-sniper" aria-controls="tab-sniper" aria-selected="false" data-tab="sniper">Sniper Solana (simulación)</button>
+  </nav>
+
+  <main id="tab-cripto" role="tabpanel" aria-labelledby="tab-btn-cripto">
+    <section class="cards" id="cards" aria-label="Resumen"></section>
+    <section class="grid">
+      <article class="panel span-7">
+        <header>
+          <h2>Historial del saldo</h2>
+          <div class="legend" id="balance-legend"></div>
+        </header>
+        <div class="chart" id="chart-balance"></div>
+        <div class="hint" id="balance-hint"></div>
+      </article>
+      <article class="panel span-5">
+        <header><h2>Registro de actividad</h2><span class="hint" id="log-hint"></span></header>
+        <div class="log" id="log"></div>
+      </article>
+      <article class="panel span-12 pulse">
+        <header><h2>Latido <em>·</em> paso diario</h2><span class="hint" id="pulse-hint"></span></header>
+        <div id="pulse"></div>
+        <div class="pulse-legend">
+          <span><i style="background:var(--good)"></i>paso hecho</span>
+          <span><i style="background:var(--warn)"></i>perdido o sin datos</span>
+          <span><i style="background:var(--series-2)"></i>solo análisis</span>
+          <span><i style="background:var(--muted)"></i>nada</span>
+        </div>
+      </article>
+      <article class="panel span-12">
+        <header><h2>Los seis pasos del día</h2><span class="hint" id="agents-hint"></span></header>
+        <div class="agents" id="agents"></div>
+        <div class="office" id="office" aria-hidden="true"></div>
+      </article>
+      <article class="panel span-7">
+        <header><h2>Hoy</h2><span class="hint" id="hoy-hint"></span></header>
+        <div id="hoy"></div>
+      </article>
+      <article class="panel span-5">
+        <header><h2>Umbrales</h2><span class="hint" id="umbrales-hint"></span></header>
+        <div id="umbrales"></div>
+      </article>
+      <article class="panel span-7">
+        <header><h2>Backtest <em>·</em> qué hizo la regla antes</h2><span class="hint" id="bt-hint"></span></header>
+        <div id="backtest"></div>
+      </article>
+      <article class="panel span-5">
+        <header><h2>Universo de hoy</h2><span class="hint" id="uni-hint"></span></header>
+        <div id="universo"></div>
+      </article>
+      <article class="panel span-12" id="report-panel" hidden>
+        <details class="report" id="report-box">
+          <summary>Informe del día completo</summary>
+          <pre id="report"></pre>
+        </details>
+      </article>
+    </section>
+  </main>
+
+  <main id="tab-sniper" role="tabpanel" aria-labelledby="tab-btn-sniper" hidden>
+    <section class="cards" id="sn-cards"></section>
+    <section class="grid">
+      <article class="panel span-12" id="sn-placeholder"></article>
+      <article class="panel span-7" id="sn-log-box" hidden>
+        <header><h2>Registro</h2></header>
+        <div class="scroll" id="sn-log"></div>
+      </article>
+      <article class="panel span-5" id="sn-pos-box" hidden>
+        <header><h2>Posiciones</h2></header>
+        <div class="scroll" id="sn-pos"></div>
+      </article>
+    </section>
+  </main>
+
+  <footer>
+    <span id="updated">—</span>
+    <span>Nadie puede saber qué moneda subirá. Esto no es una recomendación de inversión.</span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const POLL_MS = 15000;
+const NO_DATA = "sin datos todavía";
+const MINUS = "−";
+const MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const state = { tab: "cripto", run: null, cripto: null, sniper: null, lastOk: null, timer: null };
+const $ = (id) => document.getElementById(id);
+
+// --- Formato (español) -------------------------------------------------------------------
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function isNum(x) { return typeof x === "number" && Number.isFinite(x); }
+function fmtNum(x, d = 0, sign = false) {
+  if (!isNum(x)) return "—";
+  const fixed = Math.abs(x).toFixed(d);
+  const [i, f] = fixed.split(".");
+  const body = i.replace(/\B(?=(\d{3})+(?!\d))/g, ".") + (f ? "," + f : "");
+  if (Number(fixed) === 0) return body;
+  if (x < 0) return MINUS + body;
+  return (sign ? "+" : "") + body;
+}
+const NBSP = "\u00a0";
+function fmtUsd(x, d = 2, sign = false) { return isNum(x) ? fmtNum(x, d, sign) + NBSP + "$" : "—"; }
+function fmtPct(x, d = 1, sign = true) { return isNum(x) ? fmtNum(x * 100, d, sign) + NBSP + "%" : "—"; }
+function fmtDay(iso, year = false) {
+  if (!iso) return "—";
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  return `${d} ${MONTHS[m - 1]}` + (year ? ` ${y}` : "");
+}
+function fmtWhen(iso) {
+  if (!iso) return "—";
+  const t = new Date(iso);
+  const hh = String(t.getUTCHours()).padStart(2, "0"), mm = String(t.getUTCMinutes()).padStart(2, "0");
+  return `${t.getUTCDate()} ${MONTHS[t.getUTCMonth()]} ${hh}:${mm}`;
+}
+function fmtAgo(sec) {
+  if (!isNum(sec)) return "nunca";
+  if (sec < 60) return `hace ${Math.round(sec)} s`;
+  if (sec < 3600) return `hace ${Math.round(sec / 60)} min`;
+  if (sec < 86400) { const h = Math.floor(sec / 3600); return `hace ${h} h ${Math.round((sec % 3600) / 60)} min`; }
+  const d = Math.floor(sec / 86400); return `hace ${d} d ${Math.round((sec % 86400) / 3600)} h`;
+}
+function trend(x) { return isNum(x) ? `${Math.round(x * 3)} de 3` : "—"; }
+function signClass(x) { return !isNum(x) || x === 0 ? "" : x > 0 ? "good" : "bad"; }
+function empty(text = NO_DATA) { return `<div class="empty-state">${esc(text)}</div>`; }
+
+// --- Mascotas (formas propias, dos puntos por ojos) ---------------------------------------
+const INK = "#0b0d12";
+function eyes(y, x1, x2, r = 3.3) {
+  return `<g class="eye"><circle cx="${x1}" cy="${y}" r="${r}" fill="${INK}"/><circle cx="${x2}" cy="${y}" r="${r}" fill="${INK}"/></g>` +
+    `<circle cx="${x1 - 5}" cy="${y + 7}" r="2.6" fill="#ff8fc4" opacity=".35"/><circle cx="${x2 + 5}" cy="${y + 7}" r="2.6" fill="#ff8fc4" opacity=".35"/>`;
+}
+function starPoints(cx, cy, ro, ri) {
+  const pts = [];
+  for (let k = 0; k < 10; k++) {
+    const a = -Math.PI / 2 + (k * Math.PI) / 5, r = k % 2 ? ri : ro;
+    pts.push(`${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`);
+  }
+  return pts.join(" ");
+}
+const MASCOTS = {
+  "01": { name: "VELA", color: "#2fd4c4", body: (c) =>
+    `<path d="M32 4c4.5 5 4.5 8.5 0 10c-4.5-1.5-4.5-5 0-10z" fill="#ffc94d"/>` +
+    `<rect x="31" y="12" width="2" height="7" rx="1" fill="#d9fffa"/>` +
+    `<rect x="16" y="18" width="32" height="42" rx="10" fill="${c}"/>` +
+    `<path d="M40 18h8v9a4 4 0 0 1-8 0z" fill="#8ff3e8"/>` + eyes(37, 26, 38) },
+  "02": { name: "CRIBA", color: "#a07cff", body: (c) =>
+    `<path d="M9 13H55L41 37V54L23 59V37Z" fill="${c}" stroke="${c}" stroke-width="6" stroke-linejoin="round"/>` +
+    `<path d="M15 20H49" stroke="#cdb9ff" stroke-width="2.5" stroke-linecap="round" opacity=".7"/>` + eyes(27, 26, 38) },
+  "03": { name: "NOTA", color: "#ffd23f", body: (c) =>
+    `<polygon points="${starPoints(32, 35, 27, 13)}" fill="${c}" stroke="${c}" stroke-width="5" stroke-linejoin="round"/>` + eyes(35, 27, 37, 3) },
+  "04": { name: "FRENO", color: "#ff6b5e", body: (c) =>
+    `<polygon points="22,7 42,7 57,22 57,42 42,57 22,57 7,42 7,22" fill="${c}" stroke="${c}" stroke-width="5" stroke-linejoin="round"/>` +
+    `<rect x="20" y="42" width="24" height="4" rx="2" fill="#ffd0cb" opacity=".8"/>` + eyes(30, 25, 39) },
+  "05": { name: "CHISPA", color: "#9be15d", body: (c) =>
+    `<polygon points="32,5 59,32 32,59 5,32" fill="${c}" stroke="${c}" stroke-width="5" stroke-linejoin="round"/>` +
+    `<path d="M45 9l3-6M52 15l6-3" stroke="#e4ffc8" stroke-width="2.5" stroke-linecap="round"/>` + eyes(31, 26, 38, 3) },
+  "06": { name: "TOMO", color: "#ff9f43", body: (c) =>
+    `<rect x="8" y="10" width="48" height="46" rx="7" fill="${c}"/>` +
+    `<rect x="8" y="10" width="11" height="46" rx="6" fill="#d97a1f"/>` +
+    `<rect x="14" y="50" width="42" height="6" rx="3" fill="#ffe2c2"/>` + eyes(31, 31, 44) },
+};
+function mascot(id, size = 52, cls = "mascot") {
+  const m = MASCOTS[id];
+  if (!m) return "";
+  return `<svg class="${cls}" viewBox="0 0 64 64" width="${size}" height="${size}" aria-hidden="true">${m.body(m.color)}</svg>`;
+}
+
+// --- Gráficos ----------------------------------------------------------------------------
+function niceTicks(lo, hi, n = 4) {
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((s) => s * mag).find((s) => s >= raw) || raw;
+  const out = [], first = Math.floor(lo / step), last = Math.ceil(hi / step);
+  for (let k = first; k <= last; k++) out.push(Number((k * step).toFixed(10)));
+  return out;
+}
+function lineChart(el, opts) {
+  const { xs, series, yFmt, baseline, baselineLabel, height = 270 } = opts;
+  const W = Math.max(280, el.clientWidth || 600), H = height;
+  const m = { l: 52, r: 74, t: 14, b: 28 };
+  const vals = series.flatMap((s) => s.values.filter(isNum));
+  if (isNum(baseline)) vals.push(baseline);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo || Math.abs(hi) || 1) * 0.08;
+  const ticks = niceTicks(lo - pad, hi + pad);
+  lo = ticks[0]; hi = ticks[ticks.length - 1];
+  const n = xs.length, iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const x = (i) => m.l + (n > 1 ? (i * iw) / (n - 1) : iw / 2);
+  const y = (v) => m.t + ((hi - v) / (hi - lo)) * ih;
+  let g = "";
+  for (const t of ticks) {
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)" stroke-width="1"/>`;
+    g += `<text x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${esc(yFmt(t))}</text>`;
+  }
+  const labelIdx = n > 2 ? [0, Math.floor((n - 1) / 2), n - 1] : n === 2 ? [0, 1] : [0];
+  for (const i of labelIdx) {
+    const anchor = i === 0 && n > 1 ? "start" : i === n - 1 && n > 1 ? "end" : "middle";
+    g += `<text x="${x(i)}" y="${H - 8}" text-anchor="${anchor}">${esc(fmtDay(xs[i]))}</text>`;
+  }
+  if (isNum(baseline)) {
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(baseline)}" y2="${y(baseline)}" stroke="var(--muted)" stroke-width="1" opacity=".7"/>`;
+    g += `<text x="${W - m.r + 6}" y="${y(baseline) + 4}">${esc(baselineLabel || "")}</text>`;
+  }
+  const ends = [];
+  for (const s of series) {
+    let d = "", pen = false;
+    s.values.forEach((v, i) => {
+      if (!isNum(v)) { pen = false; return; }
+      d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`;
+      pen = true;
+    });
+    if (d) g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    const last = s.values.length - 1 - [...s.values].reverse().findIndex(isNum);
+    if (last >= 0 && last < s.values.length && isNum(s.values[last])) {
+      g += `<circle cx="${x(last)}" cy="${y(s.values[last])}" r="4" fill="${s.color}" stroke="var(--surface)" stroke-width="2"/>`;
+      ends.push({ y: y(s.values[last]), text: yFmt(s.values[last]), x: x(last) });
+    }
+    if (n === 1 && isNum(s.values[0])) g += `<circle cx="${x(0)}" cy="${y(s.values[0])}" r="5" fill="${s.color}"/>`;
+  }
+  ends.sort((a, b) => a.y - b.y);
+  for (let k = 1; k < ends.length; k++) if (ends[k].y - ends[k - 1].y < 14) ends[k].y = ends[k - 1].y + 14;
+  for (const e of ends) g += `<text x="${e.x + 9}" y="${e.y + 4}" style="fill:var(--ink-2);font-weight:650">${esc(e.text)}</text>`;
+  g += `<g class="hover" visibility="hidden"><line class="vl" y1="${m.t}" y2="${H - m.b}" stroke="var(--ink-2)" stroke-width="1" opacity=".5"/>` +
+    series.map((s, k) => `<circle class="hd${k}" r="4.5" fill="${s.color}" stroke="var(--surface)" stroke-width="2"/>`).join("") + `</g>`;
+  g += `<rect class="hit" x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.label || "")}">${g}</svg><div class="tip" hidden></div>`;
+  const svg = el.querySelector("svg"), tip = el.querySelector(".tip"), hover = svg.querySelector(".hover");
+  const move = (ev) => {
+    const r = svg.getBoundingClientRect();
+    const px = ((ev.clientX - r.left) / r.width) * W;
+    const i = Math.max(0, Math.min(n - 1, Math.round(n > 1 ? ((px - m.l) / iw) * (n - 1) : 0)));
+    hover.setAttribute("visibility", "visible");
+    const vl = hover.querySelector(".vl");
+    vl.setAttribute("x1", x(i)); vl.setAttribute("x2", x(i));
+    let rows = `<b>${esc(fmtDay(xs[i], true))}</b>`;
+    series.forEach((s, k) => {
+      const c = hover.querySelector(".hd" + k), v = s.values[i];
+      if (isNum(v)) { c.setAttribute("cx", x(i)); c.setAttribute("cy", y(v)); c.setAttribute("visibility", "visible"); }
+      else c.setAttribute("visibility", "hidden");
+      rows += `<div class="row"><i style="background:${s.color}"></i>${esc(s.name)}: <b>${esc(isNum(v) ? yFmt(v) : "—")}</b></div>`;
+    });
+    if (opts.extra) rows += opts.extra(i);
+    tip.innerHTML = rows; tip.hidden = false;
+    const left = (x(i) / W) * r.width, tw = tip.offsetWidth;
+    tip.style.left = Math.max(0, Math.min(r.width - tw, left + 12 + tw > r.width ? left - tw - 12 : left + 12)) + "px";
+    tip.style.top = "8px";
+  };
+  const hit = svg.querySelector(".hit");
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerdown", move);
+  hit.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); tip.hidden = true; });
+}
+
+function barChart(el, cats, series, yFmt, height = 230) {
+  const W = Math.max(280, el.clientWidth || 600), H = height, m = { l: 48, r: 10, t: 18, b: 30 };
+  const vals = series.flatMap((s) => s.values.filter(isNum)).concat([0]);
+  const ticks = niceTicks(Math.min(...vals), Math.max(...vals));
+  const lo = ticks[0], hi = ticks[ticks.length - 1];
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const y = (v) => m.t + ((hi - v) / (hi - lo)) * ih;
+  const band = iw / cats.length, gap = 2, bw = Math.min(34, (band * 0.62) / series.length);
+  let g = "";
+  for (const t of ticks) {
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)"/>`;
+    g += `<text x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${esc(yFmt(t))}</text>`;
+  }
+  cats.forEach((c, i) => {
+    const cx = m.l + band * i + band / 2, total = series.length * bw + (series.length - 1) * gap;
+    series.forEach((s, k) => {
+      const v = s.values[i];
+      if (!isNum(v)) return;
+      const x0 = cx - total / 2 + k * (bw + gap), top = Math.min(y(v), y(0)), h = Math.max(1, Math.abs(y(v) - y(0)));
+      g += `<rect x="${x0}" y="${top}" width="${bw}" height="${h}" rx="3" fill="${s.color}"><title>${esc(c)} · ${esc(s.name)}: ${esc(yFmt(v))}</title></rect>`;
+      const ly = v >= 0 ? top - 5 : top + h + 12;
+      g += `<text x="${x0 + bw / 2}" y="${ly}" text-anchor="middle" style="fill:var(--ink-2);font-size:10.5px">${esc(yFmt(v))}</text>`;
+    });
+    g += `<text x="${cx}" y="${H - 9}" text-anchor="middle">${esc(c)}</text>`;
+  });
+  g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(0)}" y2="${y(0)}" stroke="var(--muted)"/>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Rentabilidad al año por periodo">${g}</svg>`;
+}
+
+// --- Pestaña cripto ----------------------------------------------------------------------
+function renderHeader(d) {
+  const beat = d.latido || {};
+  const live = $("live");
+  live.classList.toggle("on", !!beat.en_vivo);
+  live.classList.toggle("off", !beat.en_vivo);
+  live.querySelector("b").textContent = beat.en_vivo ? "LIVE" : "OFFLINE";
+  const st = beat.estado ? ` · ${beat.estado}` : "";
+  $("beat").textContent = beat.ultimo ? `último latido ${fmtAgo(beat.edad_s)}${st}` : "sin latidos todavía";
+  $("beat").title = beat.ultimo ? `Último paso diario: ${fmtWhen(beat.ultimo)} UTC (día ${beat.dia || "—"})` : "";
+}
+
+function card(label, inner, cls = "") { return `<div class="card ${cls}"><div class="label">${esc(label)}</div>${inner}</div>`; }
+
+function renderCards(t) {
+  const out = [];
+  const none = `<div class="big empty">${NO_DATA}</div>`;
+  if (t.saldo) {
+    const r = t.resultado;
+    out.push(card("Saldo", `<div class="big">${fmtUsd(t.saldo.valor)}</div><div class="sub">desde ${fmtUsd(t.inicial)} · <span class="${signClass(r.pct)}">${fmtPct(r.pct)}</span></div>`));
+    out.push(card("Ganancia / pérdida", `<div class="big ${signClass(r.usd)}">${fmtUsd(r.usd, 2, true)}</div><div class="sub">comisiones ${fmtUsd(r.comisiones)} · ${r.operaciones} operaciones</div>`));
+    const a = t.aciertos, closed = a.ganadas + a.perdidas;
+    const rate = closed ? ` · ${fmtNum((a.ganadas / closed) * 100)}${NBSP}% de ${closed}` : "";
+    out.push(card("Aciertos", `<div class="big"><span class="good">${a.ganadas}G</span> <span class="muted">/</span> <span class="bad">${a.perdidas}P</span></div><div class="sub">ganadas / perdidas${rate} · ${a.abiertas} abiertas</div>`));
+    const c = t.caida, limit = c.parada || 0.5, w = Math.min(100, ((c.maxima || 0) / limit) * 100);
+    out.push(card("Caída máxima", `<div class="big">${fmtPct(c.maxima, 1, false)}</div><div class="sub">ahora ${fmtPct(c.actual, 1, false)} · se para al ${fmtPct(limit, 0, false)}</div><div class="meter" title="caída máxima frente al límite"><i style="width:${w}%"></i></div>`));
+  } else {
+    out.push(card("Saldo", none + `<div class="sub">${isNum(t.inicial) ? "empieza con " + fmtUsd(t.inicial) : "cartera de 100 $ ficticios"}</div>`));
+    out.push(card("Ganancia / pérdida", none));
+    out.push(card("Aciertos", none));
+    out.push(card("Caída máxima", none));
+  }
+  const s = t.semaforo || {};
+  const names = { verde: "VERDE", ambar: "ÁMBAR", rojo: "ROJO", gris: "GRIS" };
+  const lamp = (c) => `<i class="lamp ${c || "gris"}"></i>`;
+  const head = s.conclusion
+    ? `<div class="big light">${lamp(s.conclusion)}${names[s.conclusion]}</div>`
+    : `<div class="big empty">sin calcular</div>`;
+  const live = s.en_vivo ? `${names[s.en_vivo]} (día ${s.dias_en_vivo} de ${s.dias_necesarios})` : "sin calcular en el panel";
+  out.push(card("¿Es rentable?", head +
+    `<div class="lights"><span>${lamp(s.backtest)}Backtest: ${s.backtest ? names[s.backtest] : "—"}${s.hay_backtest ? "" : " (no hay)"}</span><span>${lamp(s.en_vivo)}En vivo: ${esc(live)}</span></div>` +
+    `<div class="sub muted" style="margin-top:6px">${esc(s.aviso || "")}</div>`, "wide"));
+  $("cards").innerHTML = out.join("");
+}
+
+function renderBalance(d) {
+  const el = $("chart-balance"), curve = d.curva || [];
+  const runs = d.carteras || [];
+  let legend = "";
+  if (curve.length) legend = `<span><i style="background:var(--series-1)"></i>Cartera de prueba</span><span><i style="background:var(--series-2)"></i>BTC comprado el mismo día</span>`;
+  if (runs.length > 1) {
+    const cur = d.cartera ? d.cartera.id : null;
+    legend += `<select id="run-select" aria-label="Cartera">` + runs.map((r) =>
+      `<option value="${r.id}" ${r.id === cur ? "selected" : ""}>n.º ${r.id} · ${esc(r.tipo)} · ${esc(r.estado)}</option>`).join("") + `</select>`;
+  }
+  $("balance-legend").innerHTML = legend;
+  const sel = $("run-select");
+  if (sel) sel.onchange = () => { state.run = sel.value; refresh(); };
+  if (!curve.length) {
+    el.innerHTML = empty(d.cartera ? "sin datos todavía: la cartera aún no ha dado ningún paso" : NO_DATA);
+    $("balance-hint").textContent = "";
+    return;
+  }
+  lineChart(el, {
+    xs: curve.map((p) => p.dia),
+    series: [
+      { name: "Cartera", color: "var(--series-1)", values: curve.map((p) => p.valor) },
+      { name: "BTC", color: "var(--series-2)", values: curve.map((p) => p.btc) },
+    ],
+    yFmt: (v) => fmtUsd(v, Math.abs(v) >= 1000 ? 0 : 2).replace(",00" + NBSP, NBSP),
+    baseline: d.tarjetas.inicial, baselineLabel: "inicio",
+    label: "Valor de la cartera de prueba frente a BTC",
+    height: el.clientWidth > 700 ? 360 : 250,
+    extra: (i) => `<div class="row muted">peor momento: ${fmtUsd(curve[i].peor)} · ${curve[i].posiciones} posiciones</div>`,
+  });
+  const c = d.cartera;
+  $("balance-hint").textContent = c ? `Cartera n.º ${c.id} (${c.tipo}), ${c.estado_texto}, desde el ${fmtDay(c.desde, true)}. Valor al cierre de cada día.` : "";
+}
+
+function renderLog(rows) {
+  $("log-hint").textContent = rows.length ? `últimos ${rows.length}` : "";
+  if (!rows.length) { $("log").innerHTML = empty(); return; }
+  $("log").innerHTML = rows.map((r) => {
+    if (r.tipo === "evento") {
+      return `<div class="logrow"><span class="tag evt">EVENTO</span><div class="what"><div class="why" style="color:var(--ink-2)">${esc(r.texto)}</div></div><div class="res"><div class="when">${esc(fmtWhen(r.cuando))}</div></div></div>`;
+    }
+    const buy = r.lado === "compra";
+    let res = "";
+    if (r.estado !== "filled") res = `<span class="tag rej">${r.estado === "rejected" ? "RECHAZADA" : esc(r.estado.toUpperCase())}</span>`;
+    else if (r.resultado) {
+      const x = r.resultado;
+      const label = x.abierta ? "ABIERTA" : x.gana ? "GANA" : "PIERDE";
+      const cls = x.abierta ? "open" : x.gana ? "win" : "loss";
+      res = `<span class="tag ${cls}">${label}</span><div class="${signClass(x.usd)}">${fmtUsd(x.usd, 2, true)} <span class="muted">(${fmtPct(x.pct)})</span></div>`;
+    }
+    return `<div class="logrow"><span class="tag ${buy ? "buy" : "sell"}">${buy ? "COMPRA" : "VENTA"}</span>` +
+      `<div class="what"><b>${esc(r.moneda)}</b> <span class="num">${fmtUsd(r.usd)}</span><div class="why">${esc(r.motivo)}</div></div>` +
+      `<div class="res">${res}<div class="when">${esc(fmtWhen(r.cuando))}</div></div></div>`;
+  }).join("");
+}
+
+function renderPulse(days, beat) {
+  const el = $("pulse");
+  const W = Math.max(320, el.clientWidth || 900), H = 100, mid = 48, n = days.length, w = W / n;
+  const color = (p) => p.paso === "ok" ? "var(--good)" : p.paso ? "var(--warn)" : p.analisis ? "var(--series-2)" : "var(--muted)";
+  let g = `<line x1="0" x2="${W}" y1="${mid}" y2="${mid}" stroke="var(--grid)"/>`;
+  days.forEach((p, i) => {
+    const x0 = i * w, c = color(p);
+    let d;
+    if (p.paso === "ok" || (!p.paso && p.analisis)) {
+      const amp = p.paso === "ok" ? 1 : 0.55;
+      d = `M${x0},${mid} L${x0 + w * 0.32},${mid} L${x0 + w * 0.4},${mid + 6 * amp} L${x0 + w * 0.5},${mid - 38 * amp} L${x0 + w * 0.6},${mid + 16 * amp} L${x0 + w * 0.68},${mid} L${x0 + w},${mid}`;
+    } else if (p.paso) {
+      d = `M${x0},${mid} L${x0 + w * 0.35},${mid} Q${x0 + w * 0.5},${mid - 14} ${x0 + w * 0.65},${mid} L${x0 + w},${mid}`;
+    } else {
+      d = `M${x0},${mid} L${x0 + w},${mid}`;
+    }
+    const what = p.paso === "ok" ? "paso hecho" : p.paso === "perdido" ? "día perdido" : p.paso === "sin_datos" ? "sin datos" : p.analisis ? `análisis ${p.analisis === "en_vivo" ? "en vivo" : "recalculado"}` : "nada";
+    g += `<path d="${d}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    g += `<rect x="${x0}" y="0" width="${w}" height="${H - 18}" fill="transparent"><title>${esc(fmtDay(p.dia, true))}: ${esc(what)}</title></rect>`;
+  });
+  g += `<text x="0" y="${H - 2}">${esc(fmtDay(days[0]?.dia))}</text><text x="${W}" y="${H - 2}" text-anchor="end">${esc(fmtDay(days[n - 1]?.dia))}</text>`;
+  if (beat.en_vivo) g += `<g class="scan" style="--scan-w:${W}px"><circle cx="0" cy="${mid}" r="3.5" fill="var(--accent)"/></g>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Latido de los últimos ${n} días">${g}</svg>`;
+  const ok = days.filter((p) => p.paso === "ok").length;
+  $("pulse-hint").textContent = `${ok} de ${n} días con paso hecho · ` + (beat.ultimo ? `último latido ${fmtAgo(beat.edad_s)} (${fmtWhen(beat.ultimo)} UTC)` : "sin latidos todavía");
+}
+
+function renderAgents(list, hoy) {
+  const working = list.filter((a) => a.estado === "TRABAJANDO").length;
+  $("agents-hint").textContent = working ? `${working} trabajando ahora` : "todos en espera hasta el próximo paso (00:10 UTC)";
+  $("agents").innerHTML = list.map((a) => {
+    const run = a.estado === "TRABAJANDO";
+    return `<div class="agent ${run ? "run" : ""}"><div class="head">${mascot(a.id, 46)}<div class="who"><div class="step">${esc(a.id)}·${esc(a.paso)}</div><div class="name">${esc(MASCOTS[a.id]?.name || a.nombre)}</div></div></div>` +
+      `<span class="state">${run ? "TRABAJANDO" : "EN ESPERA"}</span><div class="line">${esc(a.linea)}</div><div class="detail">${esc(a.detalle)}${a.ultima ? " · " + esc(fmtWhen(a.ultima)) : ""}</div></div>`;
+  }).join("");
+  renderOffice(list, hoy);
+}
+
+function renderOffice(list, hoy) {
+  // Escena de píxeles: el ancho sigue al del panel (en el móvil se reduce entera).
+  const box = $("office");
+  const W = Math.max(720, Math.round(box.clientWidth || 720)), H = 184, floor = 128;
+  let g = `<rect width="${W}" height="${floor}" fill="#151925"/><rect y="${floor}" width="${W}" height="${H - floor}" fill="#0f1219"/>`;
+  for (let x = 0; x < W; x += 24) g += `<rect x="${x}" y="${floor}" width="1" height="${H - floor}" fill="#161a24"/>`;
+  for (let y = floor + 14; y < H; y += 14) g += `<rect x="0" y="${y}" width="${W}" height="1" fill="#161a24"/>`;
+  g += `<rect x="16" y="10" width="84" height="42" fill="#0c0f16" stroke="#2a3040" stroke-width="3"/><rect x="56" y="10" width="3" height="42" fill="#2a3040"/><rect x="16" y="30" width="84" height="3" fill="#2a3040"/>`;
+  g += `<rect x="22" y="16" width="10" height="4" fill="#3a8ae6" opacity=".5"/><rect x="72" y="40" width="14" height="4" fill="#ec4f98" opacity=".45"/>`;
+  const top = hoy && hoy.mejores && hoy.mejores[0];
+  const board = top ? `nº 1 hoy: ${top.moneda}` : "nº 1 hoy: —";
+  const market = hoy ? (hoy.mercado.favorable ? "mercado favorable" : hoy.mercado.favorable === false ? "todo a USDT" : "sin datos") : "sin datos";
+  const bx = W - 172;
+  g += `<rect x="${bx}" y="8" width="156" height="42" rx="3" fill="#e9ecf3"/><rect x="${bx}" y="47" width="156" height="4" fill="#b8bfcf"/>`;
+  g += `<text x="${bx + 78}" y="26" text-anchor="middle" style="fill:#1b1f2a;font:700 12px var(--mono)">${esc(board)}</text>`;
+  g += `<text x="${bx + 78}" y="41" text-anchor="middle" style="fill:#4b5366;font:600 10px var(--mono)">${esc(market)}</text>`;
+  const step = (W - 40) / Math.max(1, list.length);
+  list.forEach((a, i) => {
+    const cx = Math.round(20 + step * (i + 0.5)), run = a.estado === "TRABAJANDO";
+    g += `<g class="${run ? "bobber" : ""}" style="animation-delay:${i * 0.15}s">${mascot(a.id, 46, "office-m").replace("<svg", `<svg x="${cx - 23}" y="${floor - 66}"`)}</g>`;
+    g += `<rect x="${cx - 46}" y="${floor - 26}" width="92" height="9" fill="#3b4256"/><rect x="${cx - 42}" y="${floor - 17}" width="84" height="30" fill="#2a2f3e"/>`;
+    g += `<rect x="${cx - 36}" y="${floor - 11}" width="30" height="4" fill="#3b4256"/><rect x="${cx - 36}" y="${floor - 1}" width="30" height="4" fill="#3b4256"/>`;
+    g += `<rect x="${cx + 8}" y="${floor - 50}" width="34" height="24" rx="2" fill="#2f3546"/>`;
+    g += `<rect class="${run ? "screen-on" : ""}" x="${cx + 11}" y="${floor - 47}" width="28" height="18" fill="${run ? "#ff4fa3" : "#0b0e14"}"/>`;
+    if (run) g += `<path d="M${cx + 13} ${floor - 33} l6 -5 l5 3 l6 -7 l6 4" stroke="#1a0710" stroke-width="2" fill="none"/>`;
+    g += `<rect x="${cx + 22}" y="${floor - 26}" width="6" height="3" fill="#2f3546"/>`;
+    if (!run) g += `<text class="zz" x="${cx - 30}" y="${floor - 70}" style="fill:#7d8497;font:700 11px var(--mono);animation-delay:${i * 0.4}s">z z</text>`;
+    g += `<text x="${cx}" y="${H - 12}" text-anchor="middle" style="fill:${run ? "#ff9cca" : "#7d8497"};font:700 11px var(--mono)">${esc(a.id)}·${esc(a.paso)}</text>`;
+  });
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" shape-rendering="crispEdges">${g}</svg>`;
+}
+
+function renderHoy(h) {
+  if (!h) {
+    $("hoy").innerHTML = empty("sin datos todavía: aún no hay análisis del día");
+    $("hoy-hint").textContent = ""; $("universo").innerHTML = empty(); $("uni-hint").textContent = "";
+    $("report-panel").hidden = true;
+    return;
+  }
+  $("hoy-hint").textContent = `vela del ${fmtDay(h.dia, true)} · ${h.en_vivo ? "en vivo" : "recalculado"}${h.confianza ? " · confianza " + h.confianza.toLowerCase() : ""}`;
+  const mk = h.mercado;
+  const market = mk.favorable === null || mk.favorable === undefined
+    ? `<span class="chip">mercado sin datos</span>`
+    : `<span class="chip ${mk.favorable ? "good" : "bad"}">${mk.favorable ? "▲ mercado favorable" : "▼ mercado bajista"}</span> BTC <b>${fmtUsd(mk.btc, 0)}</b> frente a su media de 100 días <b>${fmtUsd(mk.media100, 0)}</b>`;
+  const holds = h.tiene.length ? `<b>${h.tiene.map(esc).join(", ")}</b>` + (isNum(h.efectivo) ? ` y <b>${fmtUsd(h.efectivo)}</b> en USDT` : "") : (isNum(h.efectivo) ? `todo en USDT (<b>${fmtUsd(h.efectivo)}</b>)` : "—");
+  const facts = [`<div>${market}</div>`, `<div>La cartera tiene: ${holds}</div>`];
+  if (h.compras.length) facts.push(`<div>Hoy compra: ${h.compras.map((c) => `<b>${esc(c.moneda)}</b> (${fmtUsd(c.usd)})`).join(", ")}</div>`);
+  if (h.ventas.length) facts.push(`<div>Hoy vende: ${h.ventas.map((v) => `<b>${esc(v.moneda)}</b> <span class="muted">— ${esc(v.motivo || "")}</span>`).join("; ")}</div>`);
+  if (h.nota) facts.push(`<div class="warn">${esc(h.nota)}</div>`);
+  let table = empty("sin ranking: ninguna moneda puntuada");
+  if (h.mejores.length) {
+    table = `<div class="scroll"><table><thead><tr><th>#</th><th class="l">Moneda</th><th>Puntos</th><th class="opt">7 d</th><th>30 d</th><th class="opt">90 d</th><th class="opt">Se mueve</th><th>Tendencia</th><th class="opt">Riesgo</th></tr></thead><tbody>` +
+      h.mejores.map((c, i) => {
+        const badges = (c.en_cartera ? `<span class="badge held">EN CARTERA</span>` : "") + (c.compra && !c.en_cartera ? `<span class="badge buy" title="puesto de compra, con tendencia y mercado favorable">CANDIDATA</span>` : "") + (c.bloqueo ? `<span class="badge blocked" title="${esc(c.bloqueo)}">BLOQUEADA</span>` : "") + (c.avisos.length ? `<span class="badge blocked" title="${esc(c.avisos.join(" · "))}">AVISO</span>` : "");
+        return `<tr class="coin" data-i="${i}"><td>${c.puesto}</td><td class="l"><button aria-expanded="false" aria-controls="why-${i}">${esc(c.moneda)}<span class="caret">▾</span></button>${badges ? `<span class="badges">${badges}</span>` : ""}</td><td><b>${fmtNum(c.puntos)}</b></td>` +
+          `<td class="opt ${signClass(c.ret_7d)}">${fmtPct(c.ret_7d, 0)}</td><td class="${signClass(c.ret_30d)}">${fmtPct(c.ret_30d, 0)}</td><td class="opt ${signClass(c.ret_90d)}">${fmtPct(c.ret_90d, 0)}</td>` +
+          `<td class="opt">±${fmtPct(c.vol, 1, false)}</td><td>${trend(c.tendencia)}</td><td class="opt">${esc(c.riesgo || "—")}</td></tr>` +
+          `<tr class="why" id="why-${i}" hidden><td colspan="9"><b>Por qué:</b> ${esc(c.por_que)}</td></tr>`;
+      }).join("") + `</tbody></table></div><div class="hint" style="margin-top:8px">Puntos: posición frente a las demás (0-100) en subida ajustada por lo que suele moverse; no es la probabilidad de que suba. Toca una moneda para ver por qué.</div>`;
+  }
+  $("hoy").innerHTML = `<div class="decision">${esc(h.decision)}</div><div class="facts">${facts.join("")}</div><div class="label" style="margin:4px 0 6px">Las ${h.mejores.length || 10} mejor puntuadas</div>${table}`;
+  $("hoy").querySelectorAll("tr.coin").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      const why = $("why-" + tr.dataset.i), btn = tr.querySelector("button");
+      why.hidden = !why.hidden; btn.setAttribute("aria-expanded", String(!why.hidden));
+      if (!why.hidden) state.open.add(tr.dataset.i); else state.open.delete(tr.dataset.i);
+    });
+    if (state.open.has(tr.dataset.i)) { $("why-" + tr.dataset.i).hidden = false; tr.querySelector("button").setAttribute("aria-expanded", "true"); }
+  });
+  // Universo
+  $("uni-hint").textContent = `${h.pares} pares con vela ese día`;
+  const max = Math.max(1, ...h.excluidas.map((e) => e.n));
+  $("universo").innerHTML = `<div class="kv"><div><span class="label">Evaluables</span><b>${fmtNum(h.evaluadas)}</b></div><div><span class="label">Fuera</span><b>${fmtNum(h.excluidas_total)}</b></div><div><span class="label">Compra de hoy</span><b>${fmtUsd(h.tamano_compra)}</b></div></div>` +
+    (h.excluidas.length ? `<div class="label" style="margin-bottom:4px">Por qué se quedan fuera</div><div class="bars">` + h.excluidas.map((e) =>
+      `<div class="row"><span>${esc(e.motivo)}</span><div class="track"><i style="width:${(e.n / max) * 100}%"></i></div><b>${fmtNum(e.n)}</b></div>`).join("") + `</div>` : empty("ninguna fuera"));
+  const rep = h.informe;
+  $("report-panel").hidden = !rep;
+  $("report").textContent = rep || "";
+}
+
+function renderUmbrales(u) {
+  $("umbrales-hint").textContent = u.moneda ? `con la nº ${u.puesto} de hoy: ${u.moneda}` : "sin moneda nº 1 todavía";
+  let no = 0;
+  const mark = (c) => c === true ? `<span class="ok" title="cumple">✓</span>` : c === false ? `<span class="ko" title="no cumple">✗</span>` : `<span class="na" title="no aplica o sin dato">·</span>`;
+  const body = u.grupos.map((g) => `<div class="cmt"># ${esc(g.titulo)}</div>` + g.lineas.map((l) => {
+    no += 1;
+    const measured = l.medido ? `<span class="m"># ${esc(l.ambito === "cartera" ? "cartera" : l.ambito === "mercado" ? "mercado" : (u.moneda || "nº 1"))}: ${esc(l.medido)}</span>` : "";
+    return `<div class="ln"><span class="no">${no}</span><span><span class="k">${esc(l.nombre)}</span> = <span class="v">${esc(l.valor)}</span><span class="t">${esc(l.texto)}</span>${measured}</span>${mark(l.cumple)}</div>`;
+  }).join("")).join("");
+  $("umbrales").innerHTML = `<div class="code"><div class="bar"><i></i><i></i><i></i><span>umbrales.py — cada número en el que cree la regla</span></div><div class="body">${body}</div></div>` +
+    `<div class="hint" style="margin-top:8px">✓ cumple · ✗ no cumple · · no aplica o sin dato. Valores de la regla ${esc(state.cripto?.version || "")} (congelados en el código).</div>`;
+}
+
+function renderBacktest(b) {
+  if (!b) { $("backtest").innerHTML = empty("sin datos todavía: aún no hay backtest registrado de esta versión"); $("bt-hint").textContent = ""; return; }
+  const names = { verde: "VERDE", ambar: "ÁMBAR", rojo: "ROJO", gris: "GRIS" };
+  $("bt-hint").textContent = `${fmtDay(b.desde, true)} → ${fmtDay(b.hasta, true)} · ${fmtNum(b.dias)} días`;
+  const margin = isNum(b.margen[0]) ? `margen ${fmtPct(b.margen[0])} a ${fmtPct(b.margen[1])}` : "sin margen";
+  let html = `<div class="kv"><div><span class="label">Luz del backtest</span><b class="light"><i class="lamp ${b.luz || "gris"}"></i>${b.luz ? names[b.luz] : "—"}</b></div>` +
+    `<div><span class="label">Diferencia con BTC</span><b class="${signClass(b.exceso_anual)}">${fmtPct(b.exceso_anual)} al año</b><span class="hint">${esc(margin)}</span></div>` +
+    `<div><span class="label">Frente al azar</span><b>${isNum(b.nulo_percentil) ? "mejor que el " + fmtNum(b.nulo_percentil) + NBSP + "%" : "—"}</b><span class="hint">hace falta ≥ 95</span></div></div>`;
+  if (b.periodos.length) {
+    html += `<div class="legend" style="margin-bottom:4px"><span><i style="background:var(--series-1)"></i>Regla</span><span><i style="background:var(--series-2)"></i>BTC comprar y mantener</span></div><div class="chart" id="bt-chart"></div>`;
+    html += `<div class="scroll"><table style="margin-top:8px"><thead><tr><th>Periodo (al año)</th><th>Regla</th><th>BTC</th><th>BTC con filtro</th><th>10 más negociadas</th></tr></thead><tbody>` +
+      b.periodos.map((p) => `<tr><td>${esc(p.nombre)}</td><td class="${signClass(p.regla)}">${fmtPct(p.regla)}</td><td>${fmtPct(p.btc)}</td><td>${fmtPct(p.btc_filtro)}</td><td>${fmtPct(p.cesta10)}</td></tr>`).join("") + `</tbody></table></div>`;
+  }
+  html += `<div class="hint" style="margin-top:8px">Pseudo-fuera de muestra: quien eligió la regla ya conocía esos años. Lo pasado no garantiza lo futuro.</div>`;
+  $("backtest").innerHTML = html;
+  if (b.periodos.length) barChart($("bt-chart"), b.periodos.map((p) => p.nombre), [
+    { name: "Regla", color: "var(--series-1)", values: b.periodos.map((p) => p.regla) },
+    { name: "BTC", color: "var(--series-2)", values: b.periodos.map((p) => p.btc) },
+  ], (v) => fmtPct(v, 0));
+}
+
+function renderCripto(d) {
+  renderHeader(d);
+  renderCards(d.tarjetas);
+  renderBalance(d);
+  renderLog(d.actividad || []);
+  renderPulse(d.pulso || [], d.latido || {});
+  renderAgents(d.agentes || [], d.hoy);
+  renderHoy(d.hoy);
+  renderUmbrales(d.umbrales);
+  renderBacktest(d.backtest);
+}
+
+// --- Pestaña sniper ----------------------------------------------------------------------
+function genericTable(rows) {
+  if (!Array.isArray(rows) || !rows.length) return empty();
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r || {})))];
+  const cell = (v) => v === null || v === undefined ? "—" : typeof v === "number" ? fmtNum(v, Number.isInteger(v) ? 0 : 2) : typeof v === "boolean" ? (v ? "sí" : "no") : typeof v === "object" ? JSON.stringify(v) : String(v);
+  return `<table><thead><tr>${cols.map((c) => `<th class="l">${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map((r) => `<tr>${cols.map((c) => `<td class="l">${esc(cell(r[c]))}</td>`).join("")}</tr>`).join("") + `</tbody></table>`;
+}
+function renderSniper(s) {
+  const has = (k) => s && s[k] !== undefined && s[k] !== null;
+  const cards = [];
+  if (has("saldo")) cards.push(card("Saldo", `<div class="big">${fmtUsd(s.saldo)}</div>`));
+  if (has("pnl")) cards.push(card("Ganancia / pérdida", `<div class="big ${signClass(s.pnl)}">${fmtUsd(s.pnl, 2, true)}</div>`));
+  if (has("operaciones")) cards.push(card("Operaciones", `<div class="big">${fmtNum(s.operaciones)}</div>`));
+  if (has("aciertos")) {
+    const a = s.aciertos;
+    const inner = typeof a === "object" ? `<span class="good">${fmtNum(a.ganadas)}G</span> <span class="muted">/</span> <span class="bad">${fmtNum(a.perdidas)}P</span>` : esc(a);
+    cards.push(card("Aciertos", `<div class="big">${inner}</div>`));
+  }
+  if (has("latencia_ms_mediana")) cards.push(card("Latencia mediana", `<div class="big">${fmtNum(s.latencia_ms_mediana)} ms</div>`));
+  $("sn-cards").innerHTML = cards.join("");
+  $("sn-cards").hidden = !cards.length;
+  const nothing = !cards.length && !has("log") && !has("posiciones");
+  $("sn-placeholder").hidden = !nothing;
+  if (nothing) {
+    $("sn-placeholder").innerHTML = `<div class="placeholder">${mascot("05", 64)}<h3>${esc((s && s.estado) || NO_DATA)}</h3>` +
+      `<p>El bot de sniping en Solana (simulado) se construirá aparte. Cuando tenga datos, aquí verás su saldo, su resultado, las operaciones, los aciertos, la latencia, el registro y las posiciones. Solo simulación: sin claves ni transacciones reales.</p></div>`;
+  }
+  $("sn-log-box").hidden = !has("log");
+  $("sn-pos-box").hidden = !has("posiciones");
+  if (has("log")) $("sn-log").innerHTML = genericTable(s.log);
+  if (has("posiciones")) $("sn-pos").innerHTML = genericTable(s.posiciones);
+}
+
+// --- Datos y ciclo -----------------------------------------------------------------------
+async function getJSON(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `error ${r.status}`);
+    return body;
+  } finally { clearTimeout(t); }
+}
+function banner(text) { const b = $("banner"); b.hidden = !text; b.textContent = text || ""; }
+async function refresh() {
+  try {
+    const q = state.run ? `?cartera=${encodeURIComponent(state.run)}` : "";
+    const d = await getJSON("/api/estado" + q);
+    state.cripto = d; state.lastOk = Date.now();
+    renderCripto(d);
+    if (state.tab === "sniper") { state.sniper = await getJSON("/api/sniper"); renderSniper(state.sniper); }
+    banner("");
+  } catch (e) {
+    banner(`No se pudo actualizar (${e.message || "sin conexión"}). Se reintenta en 15 s; se muestran los últimos datos.`);
+  }
+  updated();
+}
+function updated() {
+  $("updated").textContent = state.lastOk ? `Actualizado ${fmtAgo((Date.now() - state.lastOk) / 1000)} · se actualiza cada 15 s` : "Cargando…";
+}
+function tick() {
+  const n = new Date();
+  $("clock").textContent = n.toISOString().slice(11, 19) + " UTC";
+  updated();
+}
+function selectTab(name) {
+  state.tab = name;
+  for (const b of document.querySelectorAll(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === name));
+  $("tab-cripto").hidden = name !== "cripto";
+  $("tab-sniper").hidden = name !== "sniper";
+  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+  if (name === "sniper") getJSON("/api/sniper").then((s) => { state.sniper = s; renderSniper(s); }).catch((e) => banner(`No se pudo leer el sniper (${e.message}).`));
+  if (name === "cripto" && state.cripto) renderCripto(state.cripto);
+}
+state.open = new Set();
+$("logo").innerHTML = mascot("01", 40);
+for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => selectTab(b.dataset.tab));
+let resizeTimer = null;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => state.cripto && state.tab === "cripto" && renderCripto(state.cripto), 150); });
+selectTab(location.hash === "#sniper" ? "sniper" : "cripto");
+refresh();
+setInterval(refresh, POLL_MS);
+setInterval(tick, 1000);
+tick();
+</script>
+</body>
+</html>

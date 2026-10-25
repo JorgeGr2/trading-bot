@@ -5,6 +5,7 @@ copybot wallets list
 copybot monitor
 copybot sim run | status | report | pause | resume | stop
 copybot crypto sync | …   (bot de cripto en Binance: ver ``copybot.crypto_cli``)
+copybot panel [--host 127.0.0.1] [--port 8000]   panel web local (solo lectura)
 
 Descubrimiento y análisis de traders: ver ``copybot.traders_cli``.
 """
@@ -17,7 +18,7 @@ import sys
 
 import structlog
 
-from copybot import backtest_cli, crypto_cli, sim_cli, traders_cli
+from copybot import backtest_cli, crypto_cli, panel_cli, sim_cli, traders_cli
 from copybot import logging as copylog
 from copybot.config import Settings
 from copybot.db.repo import Repository
@@ -68,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     sim_cli.add_parsers(sub)
     backtest_cli.add_parsers(sub)
     crypto_cli.add_parsers(sub)
+    panel_cli.add_parsers(sub)
     args = parser.parse_args(argv)
 
     unknown = unknown_settings()
@@ -90,6 +92,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "crypto":
         copylog.configure("WARNING")
         return asyncio.run(crypto_cli.run(args, settings))
+    if args.command == "panel":
+        copylog.configure("WARNING")
+        return panel_cli.run(args, settings)
     if args.command == "sim":
         copylog.configure("INFO" if args.action == "run" else "WARNING")
         return asyncio.run(sim_cli.run(args, settings))

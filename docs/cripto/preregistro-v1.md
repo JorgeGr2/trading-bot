@@ -80,3 +80,21 @@ las 3 monedas que más aportaron, solo supervivientes, retiradas al 0 % y al 100
 - Huella costes: `2c9ee6e81e6a843e090c018b4ae5790a38e525ba85cd1dd8a43fb55c2b5d557f`
 - Huella variante V1: `5944c4b01b0dfc91026ee2749f378876be0a59e28c5812c0521a8709839a8f68`
 - Huella variante V2: `fc3757f4353cfa241ab134334e975797bd8e67a6df4870a4aa9f849b18f01425`
+
+## 6. Correcciones del código antes de la primera ejecución (25-oct-2026)
+
+Una revisión adversaria del código (sin mirar ningún resultado con datos reales) encontró
+fallos de implementación, no de la regla. Se corrigieron antes del primer backtest oficial;
+las huellas de arriba no cambian porque la regla, las variantes y los costes son los mismos:
+
+- La caída máxima toma el pico del patrimonio al cierre y el valle del peor momento del día.
+- La prueba con un día de retraso ya no abre más de 5 posiciones ni gasta la reserva.
+- El libro de señales y la calibración cierran con la regla de los 7 días sin velas, sin mirar
+  datos posteriores; las velas sin operaciones cuentan como días sin negociación.
+- La curva A y las 1.000 carteras al azar usan la misma reserva (10 % del patrimonio).
+- El backtest termina en la última vela de BTC; las compras sin efectivo suficiente se omiten.
+- Subperiodos y meses cuentan su primer día; la cesta de 10 se reequilibra por diferencia.
+- Bootstrap con 5.000 remuestreos; se publican también el percentil del Sharpe en el nulo y el
+  intervalo por semanas de las operaciones.
+- Cartera en vivo: filtros solo en vivo, retiradas, posiciones por debajo del mínimo, plazo
+  hasta las 02:00, reintentos con datos incompletos y una cartera continua que no se reinicia.

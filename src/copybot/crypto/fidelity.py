@@ -14,7 +14,7 @@ anterior se ejecuta igual, como en vivo. Solo se comparan los días con paso.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
 from sqlalchemy import select
@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from copybot.config import RiskLimits
 from copybot.crypto.engine import RunConfig, simulate
 from copybot.crypto.panel import Panel
-from copybot.crypto.strategy import STRATEGY_V1, BookView, DayView, StrategyParams, decide
+from copybot.crypto.strategy import STRATEGY_V1, DayView, StrategyParams, decide
 from copybot.db.models import CryptoPaperDay, CryptoPaperEvent, CryptoPaperOrder, CryptoPaperRun
 
 Decisions = dict[date, set[tuple[str, str, str]]]
@@ -65,19 +65,11 @@ def replay_decisions(
     chooser = None
     if blocked:
 
-        def chooser(view, d, book):  # ``book`` es el libro interno de ``simulate``
+        def chooser(view, d, book):  # ``book``: la cartera que ve la decisión de ese día
             day_blocked = blocked.get(view.day)
             if not day_blocked:
                 return d
-            bv = BookView(
-                cash=book.cash,
-                holdings=dict(book.holdings),
-                prev_equity=book.prev,
-                peak_equity=book.peak,
-                initial=cfg.initial,
-                halted_risk=book.halted_risk,
-                blocked=day_blocked,
-            )
+            bv = replace(book, blocked=day_blocked)
             return decide(view, bv, params, limits, mode=cfg.mode, apply_drawdown_halt=True)
 
     run = simulate(panel, views, days, cfg, keep_decisions=True, chooser=chooser)

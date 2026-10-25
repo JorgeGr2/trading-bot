@@ -144,37 +144,43 @@ async def store(
     report_md: str | None = None,
     params: StrategyParams = STRATEGY_V1,
 ) -> int:
-    """Guarda el análisis. Si ya hay uno **en vivo** de ese día, no se toca y se devuelve
-    su id; uno recalculado se sustituye."""
+    """Guarda el análisis. Si ya hay uno **en vivo** y completo de ese día, no se toca y se
+    devuelve su id. Uno recalculado, o uno en vivo con datos incompletos (no decidió nada),
+    se sustituye en el sitio: conserva su id, al que apuntan los días de la cartera."""
     reg = a.view.regime
+    values = {
+        "params_hash": params.params_hash(),
+        "data_until": datetime(a.day.year, a.day.month, a.day.day, tzinfo=UTC) + timedelta(days=1),
+        "computed_live": live,
+        "regime": {}
+        if reg is None
+        else {"btc": reg.close, "sma100": reg.sma, "favorable": reg.favorable},
+        "universe_size": len(a.view.universe.members),
+        "status": a.status,
+        "confidence": confidence,
+        "code_commit": commit,
+        "report_md": report_md,
+        "report_json": None,
+    }
     async with sessions.begin() as s:
         existing = await s.scalar(
             select(CryptoAnalysis).where(
                 CryptoAnalysis.day == a.day, CryptoAnalysis.strategy_version == STRATEGY_VERSION
             )
         )
-        if existing is not None and existing.computed_live:
+        if existing is not None and existing.computed_live and existing.status == "ok":
             return existing.id
-        if existing is not None:
-            await s.execute(delete(CryptoAnalysis).where(CryptoAnalysis.id == existing.id))
+        if existing is None:
+            row = CryptoAnalysis(day=a.day, strategy_version=STRATEGY_VERSION, **values)
+            s.add(row)
             await s.flush()
-        row = CryptoAnalysis(
-            day=a.day,
-            strategy_version=STRATEGY_VERSION,
-            params_hash=params.params_hash(),
-            data_until=datetime(a.day.year, a.day.month, a.day.day, tzinfo=UTC) + timedelta(days=1),
-            computed_live=live,
-            regime={}
-            if reg is None
-            else {"btc": reg.close, "sma100": reg.sma, "favorable": reg.favorable},
-            universe_size=len(a.view.universe.members),
-            status=a.status,
-            confidence=confidence,
-            code_commit=commit,
-            report_md=report_md,
-        )
-        s.add(row)
-        await s.flush()
+        else:
+            row = existing
+            for key, value in values.items():
+                setattr(row, key, value)
+            await s.execute(
+                delete(CryptoAnalysisRow).where(CryptoAnalysisRow.analysis_id == row.id)
+            )
         for c in a.coins.values():
             s.add(
                 CryptoAnalysisRow(

@@ -8,8 +8,10 @@ copybot crypto backtest [--until D] [--seed 7] [--null 1000] [--out F]
 copybot crypto analyze [--day D] [--out F] análisis de un día pasado (recalculado)
 copybot crypto today                       último informe diario guardado
 copybot crypto coin SÍMBOLO [--day D]      por qué una moneda está o no, y en qué puesto
-copybot crypto paper start [--days N] | status | pause | resume | stop
-copybot crypto daily                       una vez: descargar → analizar → cartera → informe
+copybot crypto paper start [--days N] | status | pause | resume | stop [--kind K | --id N]
+                                           (parar la continua exige --kind continua o --id)
+copybot crypto daily [--tarde]             una vez: descargar → analizar → cartera → informe
+                                           (después de las 02:00 UTC solo opera con --tarde)
 copybot crypto run                         servicio: el paso diario a las 00:10 UTC
 """
 
@@ -56,7 +58,18 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     paper = csub.add_parser("paper", help="cartera de prueba (simulada)")
     paper.add_argument("paper_action", choices=["start", "status", "pause", "resume", "stop"])
     paper.add_argument("--days", type=int, default=28, help="duración de la prueba")
-    csub.add_parser("daily", help="paso diario completo, una vez")
+    paper.add_argument(
+        "--kind",
+        choices=["continua", "prueba"],
+        help="a qué cartera (por defecto, la prueba activa; parar la continua exige pedirlo)",
+    )
+    paper.add_argument("--id", type=int, dest="run_id", help="número de la cartera")
+    dly = csub.add_parser("daily", help="paso diario completo, una vez")
+    dly.add_argument(
+        "--tarde",
+        action="store_true",
+        help="operar aunque sean más de las 02:00 UTC (si no, el día queda como perdido)",
+    )
     csub.add_parser("run", help="servicio: paso diario a las 00:10 UTC")
     pre = csub.add_parser("prereg", help="comprobar el preregistro de la regla")
     pre.add_argument("prereg_action", choices=["check"])
@@ -99,9 +112,9 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         if args.action == "paper":
             return await _paper(args, sessions)
         if args.action == "daily":
-            result = await daily.run_daily(sessions, say=_say)
+            result = await daily.run_daily(sessions, say=_say, late_ok=args.tarde)
             print(result.text)
-            return 0
+            return 0 if result.status in ("ok", "sin_datos") else 1
         if args.action == "run":
             await daily.run_forever(sessions, say=_say)
             return 0
@@ -278,7 +291,6 @@ async def _today(sessions) -> int:
 
 async def _paper(args: argparse.Namespace, sessions) -> int:
     runs = await paper.active_runs(sessions)
-    test = next((r for r in runs if r.kind == "prueba"), None)
     if args.paper_action == "start":
         if prereg_check():
             print("No se puede empezar: la regla aún no está preregistrada.", file=sys.stderr)
@@ -317,15 +329,47 @@ async def _paper(args: argparse.Namespace, sessions) -> int:
                 value = "sin pasos todavía" if snap is None else f"{snap.equity_usd:.2f} $"
                 print(f"n.º {r.id} ({r.kind}) desde {r.start_day}: {r.status}; valor {value}")
         return 0
-    target = test or next((r for r in runs if r.kind == "continua"), None)
+    target, problem = paper_target(args.paper_action, runs, kind=args.kind, run_id=args.run_id)
     if target is None:
-        print("No hay ninguna cartera activa.")
+        print(problem, file=sys.stderr)
         return 1
-    if args.paper_action == "pause":
-        await paper.set_status(sessions, target.id, "PAUSED", "pausada a mano")
-    elif args.paper_action == "resume":
-        await paper.set_status(sessions, target.id, "RUNNING", "reanudada a mano")
-    else:
-        await paper.set_status(sessions, target.id, "STOPPED", "parada a mano")
-    print(f"Cartera n.º {target.id}: {args.paper_action} hecho.")
+    try:
+        if args.paper_action == "pause":
+            await paper.set_status(sessions, target.id, "PAUSED", "pausada a mano")
+        elif args.paper_action == "resume":
+            await paper.resume(sessions, target.id)
+        else:
+            await paper.set_status(sessions, target.id, "STOPPED", "parada a mano")
+    except paper.PaperError as exc:
+        print(f"Cartera n.º {target.id}: {exc}", file=sys.stderr)
+        return 1
+    print(f"Cartera n.º {target.id} ({target.kind}): {args.paper_action} hecho.")
+    if args.paper_action == "stop" and target.kind == "continua":
+        print(
+            "La cartera continua no vuelve a arrancar sola: la luz en vivo de esta versión se "
+            "queda sin días nuevos."
+        )
     return 0
+
+
+def paper_target(action: str, runs: list, *, kind: str | None = None, run_id: int | None = None):
+    """(cartera activa a la que se aplica ``action``, o ``None`` y por qué). Sin ``kind`` ni
+    ``run_id`` se elige la prueba activa (o, salvo para parar, la continua): parar la
+    continua, que no se reinicia nunca, hay que pedirlo expresamente."""
+    if run_id is not None:
+        target = next((r for r in runs if r.id == run_id), None)
+        return target, None if target else f"No hay ninguna cartera activa con el n.º {run_id}."
+    if kind is not None:
+        target = next((r for r in runs if r.kind == kind), None)
+        return target, None if target else f"No hay ninguna cartera «{kind}» activa."
+    test = next((r for r in runs if r.kind == "prueba"), None)
+    continua = next((r for r in runs if r.kind == "continua"), None)
+    if test is not None:
+        return test, None
+    if continua is not None and action == "stop":
+        return None, (
+            "No hay ninguna prueba activa. Para parar la cartera continua (no se reinicia "
+            "nunca) hay que pedirlo: «copybot crypto paper stop --kind continua» o --id "
+            f"{continua.id}."
+        )
+    return continua, None if continua else "No hay ninguna cartera activa."

@@ -29,10 +29,12 @@ class PaperInfo:
     equity: float | None = None
     btc_equity: float | None = None
     cash: float | None = None
-    day_loss: float | None = None  # pérdida del día (0,012 = 1,2 %)
-    drawdown: float | None = None
+    day_loss: float | None = None  # 1 − W(t)/E(t−1), la que dispara la parada del 20 %
+    drawdown: float | None = None  # 1 − W(t)/máximo hasta t−1, la de la parada del 50 %
     positions: dict[str, float] = field(default_factory=dict)  # moneda → valor
     status: str = "RUNNING"
+    blocked: list[tuple[str, str]] = field(default_factory=list)  # moneda, motivo
+    note: str | None = None  # p. ej. por qué hoy no hubo paso
 
 
 @dataclass
@@ -171,6 +173,8 @@ def render(
         )
     if paper is not None:
         out += ["", "QUÉ HACE HOY LA CARTERA DE PRUEBA (100 $ ficticios)"]
+        if paper.note:
+            out.append(paper.note)
         for coin, why, pnl, pnl_pct in paper.sells:
             res = (
                 ""
@@ -248,6 +252,8 @@ def render(
                 f"Caída desde el máximo: {ex.fmt_pct(paper.drawdown, 0, sign=False)} "
                 "(la cartera se para al 50 %)."
             )
+        blocked = "; ".join(f"{coin}, {why}" for coin, why in paper.blocked)
+        out.append(f"- Bloqueadas hoy en vivo: {blocked or 'ninguna'}.")
     if semaforo_line:
         out += ["", semaforo_line]
     out += [

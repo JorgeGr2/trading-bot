@@ -44,8 +44,13 @@ def test_favorable_report_names_the_best_scored_coin():
     assert "LAS 10 MEJOR PUNTUADAS" in text and "POR QUÉ" in text
     assert "Vende C05" in text and "Compra C23 por 18,00 $" in text
     assert "Esto no es una recomendación de inversión" in text
+    assert "- Pérdida de hoy: 1,2 % (sin compras al 20 %)" in text
+    assert "- Bloqueadas hoy en vivo: ninguna." in text
     data = to_json(a)
     assert data["mercado"]["favorable"] and len(data["mejores"]) == 10
+    paper.blocked = [("C22", "diferencial del 0,80 % (máximo 0,5 %)")]
+    text = render(a, generated_at=NOW, paper=paper, confidence="BAJA")
+    assert "- Bloqueadas hoy en vivo: C22, diferencial del 0,80 % (máximo 0,5 %)." in text
 
 
 def test_bear_market_says_stay_in_usdt_and_red_header():

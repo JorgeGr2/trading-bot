@@ -185,3 +185,45 @@ async def test_backfill_when_since_moves_earlier_and_filters_are_saved(engine):
         Decimal("0.001"),
         Decimal(5),
     )
+
+
+@pytest.mark.postgres
+@respx.mock
+async def test_a_pair_back_to_trading_after_a_break_is_synced_again(engine):
+    """T7: un BREAK pasajero congela el par (última descarga), pero si vuelve a TRADING se
+    descongela y la descarga sigue desde la última vela guardada."""
+    sessions = make_sessionmaker(engine)
+    since = datetime(2026, 10, 1, tzinfo=UTC)
+    day1 = datetime(2026, 10, 10, 12, tzinfo=UTC)
+    day2 = datetime(2026, 10, 12, 12, tzinfo=UTC)
+    day3 = datetime(2026, 10, 16, 12, tzinfo=UTC)
+    break_from = int(datetime(2026, 10, 11, tzinfo=UTC).timestamp() * 1000)
+    back_from = int(datetime(2026, 10, 14, tzinfo=UTC).timestamp() * 1000)
+    info_route = respx.get(f"{MIRROR}/api/v3/exchangeInfo")
+    asked: list[int] = []
+
+    def klines(request: httpx.Request) -> httpx.Response:
+        start = int(request.url.params["startTime"])
+        end = int(request.url.params["endTime"])
+        asked.append(start)
+        days = [t for t in range(start, end + 1, DAY) if t < break_from or t >= back_from]
+        return httpx.Response(200, json=[kline(t) for t in days])
+
+    respx.get(f"{MIRROR}/api/v3/klines").mock(side_effect=klines)
+    info_route.mock(return_value=_info_response(info("AAAUSDT", "AAA")))
+    await sync_all(sessions, _market(day1), since=since, clock=lambda: day1)
+    info_route.mock(return_value=_info_response(info("AAAUSDT", "AAA", status="BREAK")))
+    await sync_all(sessions, _market(day2), since=since, clock=lambda: day2)
+    async with sessions() as s:
+        frozen = await s.get(MarketSymbol, ("binance", "AAAUSDT"))
+    assert frozen.final_sync_at == day2
+    assert frozen.bars_synced_to == datetime(2026, 10, 10, tzinfo=UTC)
+    asked.clear()
+    info_route.mock(return_value=_info_response(info("AAAUSDT", "AAA")))
+    result = await sync_all(sessions, _market(day3), since=since, clock=lambda: day3)
+    async with sessions() as s:
+        aaa = await s.get(MarketSymbol, ("binance", "AAAUSDT"))
+    assert asked == [int(datetime(2026, 10, 11, tzinfo=UTC).timestamp() * 1000)]
+    assert result.bars == 2  # 14 y 15 de octubre
+    assert aaa.status == "TRADING" and aaa.final_sync_at is None
+    assert aaa.bars_synced_to == datetime(2026, 10, 15, tzinfo=UTC)

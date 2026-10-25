@@ -76,7 +76,8 @@ async def sync_symbols(
     now: datetime,
 ) -> int:
     """Guarda o actualiza los pares (estado y filtros); devuelve cuántos son nuevos. Los
-    pares conocidos que ya no salen en Binance pasan a ``DESAPARECIDO``."""
+    pares conocidos que ya no salen en Binance pasan a ``DESAPARECIDO``; uno congelado
+    que vuelve a ``TRADING`` se descongela."""
     infos = list(infos)
     seen = {i.symbol for i in infos}
     async with sessions.begin() as s:
@@ -107,6 +108,10 @@ async def sync_symbols(
                 continue
             if row.status != info.status:
                 row.status, row.status_changed_at = info.status, now
+                if info.status == "TRADING":
+                    # Vuelve a cotizar (p. ej. tras un BREAK pasajero): se descongela y la
+                    # descarga sigue desde ``bars_synced_to``.
+                    row.final_sync_at = None
             row.spot = info.spot
             row.last_seen_at = now
             row.tick_size, row.step_size = info.tick_size, info.step_size
